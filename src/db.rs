@@ -266,6 +266,23 @@ impl Db {
         Ok(())
     }
 
+    pub fn nullifier_exists(&self, nullifier: &Nullifier) -> miette::Result<bool> {
+        let nullifier_exists =
+            match self
+                .conn
+                .query_row("SELECT nullifier FROM nullifiers", [], |row| {
+                    let nullifier: Vec<u8> = row.get(0)?;
+                    Ok(nullifier)
+                }) {
+                Ok(_) => true,
+                Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                Err(err) => {
+                    return Err(err).into_diagnostic();
+                }
+            };
+        Ok(nullifier_exists)
+    }
+
     pub fn store_block(&self, anchor: &Anchor, block: &Block) -> miette::Result<()> {
         let block_bytes = bincode::serialize(block).into_diagnostic()?;
         self.conn
@@ -285,10 +302,12 @@ impl Db {
     }
 
     pub fn connect_block(&self, block: &Block) -> miette::Result<Anchor> {
-        // TODO: Check that nullifiers don't exist.
         // TODO: Validate zkSNARK, authorizing signature, binding signature
         let nullifiers = block.nullifiers();
         for nullifier in &nullifiers {
+            if self.nullifier_exists(nullifier)? {
+                return Err(miette!("nullifier exists, note is already spent"));
+            }
             self.insert_nullifier(nullifier)?;
         }
 
