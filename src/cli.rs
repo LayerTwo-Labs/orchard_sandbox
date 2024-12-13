@@ -22,4 +22,8 @@ pub enum Commands {
     SubmitTxn,
     /// Mine a block
     Mine,
+    /// Get wallet seed mnemonic 12 words
+    GetMnemonic,
+    /// Get new shielded address
+    GetNewAddress,
 }

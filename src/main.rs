@@ -66,6 +66,17 @@ fn main() -> miette::Result<()> {
         cli::Commands::Mine => {
             db.mine()?;
         }
+        cli::Commands::GetMnemonic => {
+            let mnemonic = db.get_mnemonic()?;
+            let phrase = mnemonic.phrase().to_string();
+            println!("{phrase}");
+        }
+        cli::Commands::GetNewAddress => {
+            let address = db.get_new_address()?;
+            let address_bytes = address.to_raw_address_bytes();
+            let address_string = bs58::encode(address_bytes).with_check().into_string();
+            println!("{address_string}");
+        }
     }
     Ok(())
 }

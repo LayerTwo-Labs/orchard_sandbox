@@ -15,7 +15,7 @@ use orchard::{
 use rand::SeedableRng;
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
-use zip32::AccountId;
+use zip32::{hardened_only::HardenedOnlyKey, AccountId, ChildIndex};
 
 use crate::types::Block;
 
@@ -36,6 +36,17 @@ impl Db {
                     rseed BLOB NOT NULL,
                     merkle_path BLOB NOT NULL
 
+            );",
+            ),
+            M::up(
+                "CREATE TABLE wallet_seed(
+                    phrase TEXT NOT NULL
+            );",
+            ),
+            M::up(
+                "CREATE TABLE addresses(
+                    id INTEGER PRIMARY KEY,
+                    address TEXT
             );",
             ),
             M::up(
@@ -88,7 +99,13 @@ impl Db {
         // 2️⃣ Update the database schema, atomically
         migrations.to_latest(&mut conn).into_diagnostic()?;
 
-        Ok(Db { conn })
+        let db = Db { conn };
+
+        if !db.get_mnemonic().is_ok() {
+            db.generate_seed()?;
+        }
+
+        Ok(db)
     }
 
     pub fn get_outputs(&self) -> miette::Result<Vec<(Vec<u8>, u64)>> {
@@ -362,4 +379,74 @@ impl Db {
 
         Ok(())
     }
+
+    pub fn set_seed(&self) -> miette::Result<()> {
+        todo!();
+    }
+
+    fn generate_seed(&self) -> miette::Result<()> {
+        let mnemonic = Mnemonic::new(bip39::MnemonicType::Words12, bip39::Language::English);
+        let phrase = mnemonic.phrase().to_string();
+        self.conn
+            .execute("INSERT INTO wallet_seed (phrase) VALUES (?1)", [phrase])
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    pub fn get_mnemonic(&self) -> miette::Result<Mnemonic> {
+        let phrase: String = self
+            .conn
+            .query_row("SELECT phrase FROM wallet_seed", [], |row| row.get(0))
+            .into_diagnostic()?;
+        let mnemonic =
+            Mnemonic::from_phrase(&phrase, bip39::Language::English).into_diagnostic()?;
+        Ok(mnemonic)
+    }
+
+    pub fn get_new_address(&self) -> miette::Result<Address> {
+        let mnemonic = self.get_mnemonic()?;
+        let seed = Seed::new(&mnemonic, "");
+        let seed_bytes = seed.as_bytes();
+        /*
+        let master_key: zip32::hardened_only::HardenedOnlyKey<OrchardContext> =
+            zip32::hardened_only::HardenedOnlyKey::master(&[seed_bytes]);
+        */
+
+        let sk = orchard::keys::SpendingKey::from_zip32_seed(seed_bytes, 0, AccountId::ZERO)
+            .expect("couldn't derive spending key from seed");
+
+        let index: u32 = match self.conn.query_row(
+            "SELECT id FROM addresses ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(index) => index,
+            Err(rusqlite::Error::QueryReturnedNoRows) => 0,
+            Err(err) => return Err(err).into_diagnostic(),
+        };
+        dbg!(index);
+
+        let fvk = orchard::keys::FullViewingKey::from(&sk);
+        let address = fvk.address_at(index + 1, zip32::Scope::External);
+
+        self.conn
+            .execute(
+                "INSERT INTO addresses (address) VALUES (?)",
+                [address.to_raw_address_bytes()],
+            )
+            .into_diagnostic()?;
+
+        Ok(address)
+    }
+}
+
+use bip39::{Mnemonic, Seed};
+
+#[derive(Debug)]
+struct OrchardContext;
+
+impl zip32::hardened_only::Context for OrchardContext {
+    const MKG_DOMAIN: [u8; 16] = *b"ZsideIP32Orchard";
+    const CKD_DOMAIN: zcash_spec::PrfExpand<([u8; 32], [u8; 4])> =
+        zcash_spec::PrfExpand::ORCHARD_ZIP32_CHILD;
 }
