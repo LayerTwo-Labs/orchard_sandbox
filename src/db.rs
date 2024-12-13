@@ -313,27 +313,35 @@ impl Db {
 
         let commitments = block.extracted_note_commitments();
         let frontier = self.get_frontier()?;
-        let anchor: MerkleHashOrchard = match frontier {
+        let anchor: Anchor = match frontier {
             Some(mut frontier) => {
-                for cmx in &commitments {
-                    let leaf = MerkleHashOrchard::from_cmx(cmx);
-                    frontier.append(leaf);
+                if commitments.is_empty() {
+                    Anchor::empty_tree()
+                } else {
+                    for cmx in &commitments {
+                        let leaf = MerkleHashOrchard::from_cmx(cmx);
+                        frontier.append(leaf);
+                    }
+                    let anchor = frontier.root(None);
+                    self.update_frontier(frontier)?;
+                    anchor.into()
                 }
-                let anchor = frontier.root(None);
-                self.update_frontier(frontier)?;
-                anchor
             }
             None => {
-                let cmx = &commitments[0];
-                let leaf = MerkleHashOrchard::from_cmx(cmx);
-                let mut frontier = NonEmptyFrontier::new(leaf);
-                for cmx in &commitments[1..] {
+                if commitments.is_empty() {
+                    Anchor::empty_tree()
+                } else {
+                    let cmx = &commitments[0];
                     let leaf = MerkleHashOrchard::from_cmx(cmx);
-                    frontier.append(leaf);
+                    let mut frontier = NonEmptyFrontier::new(leaf);
+                    for cmx in &commitments[1..] {
+                        let leaf = MerkleHashOrchard::from_cmx(cmx);
+                        frontier.append(leaf);
+                    }
+                    let anchor = frontier.root(None);
+                    self.update_frontier(frontier)?;
+                    anchor.into()
                 }
-                let anchor = frontier.root(None);
-                self.update_frontier(frontier)?;
-                anchor
             }
         };
         let anchor = Anchor::from(anchor);
