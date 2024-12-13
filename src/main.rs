@@ -1,6 +1,15 @@
+mod cli;
+mod db;
+mod types;
+
+use clap::Parser as _;
+
 use std::collections::HashSet;
 
-use incrementalmerkletree::frontier::Frontier;
+use incrementalmerkletree::{
+    frontier::{Frontier, NonEmptyFrontier},
+    Address,
+};
 use miette::IntoDiagnostic;
 use orchard::{
     builder::{BundleType, UnauthorizedBundle},
@@ -13,9 +22,55 @@ use orchard::{
     Action, Anchor, Bundle,
 };
 use rand::SeedableRng;
-use zip32::{arbitrary::SecretKey, AccountId, ChildIndex, DiversifierIndex};
+use zip32::AccountId;
+
+const NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
 
 fn main() -> miette::Result<()> {
+    /*
+    let mut rng = rand::thread_rng();
+    let leaf = MerkleHashOrchard::random(&mut rng);
+    let mut frontier = NonEmptyFrontier::<MerkleHashOrchard>::new(leaf);
+
+    dbg!(&frontier);
+    for _ in 0..100 {
+        frontier.append(leaf);
+        dbg!(&frontier.root(None));
+    }
+
+    let parts = frontier.into_parts(); // store this in DB.
+    dbg!(parts);
+    */
+
+    let cli = cli::Cli::parse();
+
+    let db = db::Db::new()?;
+
+    // You can check for the existence of subcommands, and if found use their
+    // matches just as you would the top level cmd
+    match &cli.command {
+        cli::Commands::Wallet => {
+            let outputs = db.get_outputs()?;
+            for (recipient, value) in outputs {
+                let recipient = bs58::encode(recipient).with_check().into_string();
+                println!("{recipient}: {value}");
+            }
+        }
+        cli::Commands::CreateNote { value, recipient } => {
+            db.create_note(recipient.clone(), *value)?;
+        }
+        cli::Commands::SpendNote { id } => {}
+        cli::Commands::SubmitTxn => {
+            db.submit_transaction()?;
+        }
+        cli::Commands::Mine => {
+            db.mine()?;
+        }
+    }
+    Ok(())
+}
+
+fn example() -> miette::Result<()> {
     let seed = [0; 32];
     let sk = SpendingKey::from_zip32_seed(&seed, 0, AccountId::ZERO).unwrap();
 
@@ -123,23 +178,6 @@ fn main() -> miette::Result<()> {
     dbg!(bundle.value_balance());
 
     Ok(())
-}
-
-#[derive(Debug)]
-struct Wallet {
-    notes: Vec<(Note, MerklePath)>,
-    transparent_value: i64,
-}
-
-#[derive(Debug)]
-struct Block {
-    anchor: Anchor,
-    bundles: Vec<UnauthorizedBundle<i64>>,
-}
-
-#[derive(Debug)]
-struct Chain {
-    blocks: Vec<Block>,
 }
 
 // there is a transparent
