@@ -1,7 +1,4 @@
-use incrementalmerkletree::{
-    frontier::{Frontier, NonEmptyFrontier},
-    Position,
-};
+use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
     builder::BundleType,
@@ -10,12 +7,12 @@ use orchard::{
     note::Nullifier,
     tree::MerkleHashOrchard,
     value::NoteValue,
-    Action, Address, Anchor,
+    Address, Anchor,
 };
 use rand::SeedableRng;
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
-use zip32::{hardened_only::HardenedOnlyKey, AccountId, ChildIndex};
+use zip32::AccountId;
 
 use crate::types::Block;
 
