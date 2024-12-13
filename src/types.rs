@@ -1,69 +1,78 @@
 use orchard::{
     bundle::{Authorization, Flags},
-    note::TransmittedNoteCiphertext,
+    note::{ExtractedNoteCommitment, Nullifier, TransmittedNoteCiphertext},
     Anchor,
 };
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
-    pub anchor: [u8; 32],
     pub transactions: Vec<Transaction>,
+}
+
+impl Block {
+    /// These must be added to the nullifier set when a block is connected.
+    pub fn nullifiers(&self) -> Vec<Nullifier> {
+        let mut nullifiers = vec![];
+        for transaction in &self.transactions {
+            for action in &transaction.actions {
+                let action = orchard::Action::from(action);
+                let nullifier = action.nullifier();
+                nullifiers.push(*nullifier);
+            }
+        }
+        nullifiers
+    }
+
+    /// These must be appended to the incremental note commitment merkle tree when a block is
+    /// connected.
+    pub fn extracted_note_commitments(&self) -> Vec<ExtractedNoteCommitment> {
+        let mut extracted_note_commitments = vec![];
+        for transaction in &self.transactions {
+            for action in &transaction.actions {
+                let action = orchard::Action::from(action);
+                let extracted_note_commitment = action.cmx();
+                extracted_note_commitments.push(*extracted_note_commitment);
+            }
+        }
+        extracted_note_commitments
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub actions: Vec<Action>,
-    pub value_balance: i64,
-    pub anchor: [u8; 32],
+    pub value_balance_orchard: i64,
 }
 
-impl<T: Authorization> From<orchard::bundle::Bundle<T, i64>> for Transaction {
-    fn from(value: orchard::bundle::Bundle<T, i64>) -> Self {
+impl Transaction {
+    pub fn to_bundle(
+        &self,
+        anchor: Anchor,
+    ) -> orchard::bundle::Bundle<orchard::bundle::testing::Unauthorized, i64> {
+        let actions: Vec<orchard::Action<()>> = self
+            .actions
+            .iter()
+            .cloned()
+            .map(|action| action.into())
+            .collect();
+        let actions = nonempty::NonEmpty::from_vec(actions).unwrap();
+        let flags = Flags::ENABLED;
+        let value_balance_orchard = self.value_balance_orchard;
+        let authorization = orchard::bundle::testing::Unauthorized;
+        orchard::Bundle::from_parts(actions, flags, value_balance_orchard, anchor, authorization)
+    }
+
+    pub fn from_bundle<T: Authorization>(bundle: &orchard::bundle::Bundle<T, i64>) -> Self {
         let mut actions = vec![];
-        for action in value.actions() {
+        for action in bundle.actions() {
             let action = Action::from(action);
             actions.push(action);
         }
-        Transaction {
+        Self {
             actions,
-            anchor: value.anchor().to_bytes(),
-            value_balance: *value.value_balance(),
+            value_balance_orchard: *bundle.value_balance(),
         }
-    }
-}
-
-impl From<Transaction> for orchard::bundle::Bundle<orchard::bundle::testing::Unauthorized, i64> {
-    fn from(value: Transaction) -> Self {
-        let actions: Vec<orchard::Action<()>> = value
-            .actions
-            .iter()
-            .cloned()
-            .map(|action| action.into())
-            .collect();
-        let actions = nonempty::NonEmpty::from_vec(actions).unwrap();
-        let flags = Flags::ENABLED;
-        let value_balance = value.value_balance;
-        let anchor = Anchor::from_bytes(value.anchor).unwrap();
-        let authorization = orchard::bundle::testing::Unauthorized;
-        orchard::Bundle::from_parts(actions, flags, value_balance, anchor, authorization)
-    }
-}
-
-impl From<&Transaction> for orchard::bundle::Bundle<orchard::bundle::testing::Unauthorized, i64> {
-    fn from(value: &Transaction) -> Self {
-        let actions: Vec<orchard::Action<()>> = value
-            .actions
-            .iter()
-            .cloned()
-            .map(|action| action.into())
-            .collect();
-        let actions = nonempty::NonEmpty::from_vec(actions).unwrap();
-        let flags = Flags::ENABLED;
-        let value_balance = value.value_balance;
-        let anchor = Anchor::from_bytes(value.anchor).unwrap();
-        let authorization = orchard::bundle::testing::Unauthorized;
-        orchard::Bundle::from_parts(actions, flags, value_balance, anchor, authorization)
     }
 }
 

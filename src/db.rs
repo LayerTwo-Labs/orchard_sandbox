@@ -1,17 +1,23 @@
-use incrementalmerkletree::frontier::Frontier;
+use incrementalmerkletree::{
+    frontier::{Frontier, NonEmptyFrontier},
+    Position,
+};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
     builder::BundleType,
     bundle::Flags,
     keys::{Diversifier, FullViewingKey, SpendingKey},
+    note::Nullifier,
     tree::MerkleHashOrchard,
     value::NoteValue,
-    Action, Address, Anchor, Bundle,
+    Action, Address, Anchor,
 };
 use rand::SeedableRng;
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 use zip32::AccountId;
+
+use crate::types::Block;
 
 pub struct Db {
     conn: Connection,
@@ -55,7 +61,7 @@ impl Db {
                 "CREATE TABLE blocks(
                     id INTEGER PRIMARY KEY,
                     anchor BLOB NOT NULL,
-                    transactions BLOB NOT NULL
+                    block BLOB NOT NULL
             );",
             ),
             M::up(
@@ -72,8 +78,6 @@ impl Db {
                     value INTEGER NOT NULL
             );",
             ),
-            // In the future, add more migrations here:
-            //M::up("ALTER TABLE friend ADD COLUMN email TEXT;"),
         ]);
 
         let mut conn = Connection::open("./orchard.db3").into_diagnostic()?;
@@ -156,7 +160,7 @@ impl Db {
 
         dbg!(bundle.value_balance());
 
-        let transaction: crate::types::Transaction = bundle.into();
+        let transaction = crate::types::Transaction::from_bundle(&bundle);
 
         let transaction_bytes = bincode::serialize(&transaction).into_diagnostic()?;
 
@@ -197,60 +201,138 @@ impl Db {
         Ok(transactions)
     }
 
-    pub fn get_last_anchor(&self) -> miette::Result<Anchor> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT anchor FROM blocks WHERE id = (SELECT MAX(id) FROM blocks)")
-            .into_diagnostic()?;
-        let anchor: Vec<Vec<u8>> = statement
-            .query_map([], |row| Ok(row.get(0)?))
-            .into_diagnostic()?
-            .collect::<Result<Vec<_>, _>>()
-            .into_diagnostic()?;
-        if anchor.len() == 0 {
-            return Ok(Anchor::empty_tree());
-        }
-        let anchor: [u8; 32] = anchor[0]
-            .clone()
+    pub fn get_frontier(&self) -> miette::Result<Option<NonEmptyFrontier<MerkleHashOrchard>>> {
+        let (position, leaf, ommers): (u64, Vec<u8>, Vec<u8>) =
+            match self
+                .conn
+                .query_row("SELECT position, leaf, ommers FROM frontier", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                }) {
+                Ok((position, leaf, ommers)) => (position, leaf, ommers),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Ok(None);
+                }
+                Err(err) => {
+                    return Err(err).into_diagnostic();
+                }
+            };
+        let position = Position::from(position);
+        let leaf: [u8; 32] = leaf
             .try_into()
-            .map_err(|_err| miette!("anchor length is wrong"))?;
-        let anchor = Anchor::from_bytes(anchor).unwrap();
+            .map_err(|_| miette!("wrong leaf length in SQLite db"))?;
+        let leaf = MerkleHashOrchard::from_bytes(&leaf)
+            .expect("subtle error while converting leaf from bytes");
+        let ommers: Vec<[u8; 32]> = bincode::deserialize(&ommers).into_diagnostic()?;
+        let ommers: Vec<MerkleHashOrchard> = ommers
+            .iter()
+            .map(|ommer| {
+                MerkleHashOrchard::from_bytes(ommer)
+                    .expect("subtle error while converting ommer from bytes")
+            })
+            .collect();
+        let frontier = NonEmptyFrontier::from_parts(position, leaf, ommers)
+            .expect("failed to reconstruct frontier");
+        Ok(Some(frontier))
+    }
+
+    pub fn update_frontier(
+        &self,
+        frontier: NonEmptyFrontier<MerkleHashOrchard>,
+    ) -> miette::Result<()> {
+        self.conn
+            .execute("DELETE FROM frontier", [])
+            .into_diagnostic()?;
+        let (position, leaf, ommers) = frontier.into_parts();
+        let position: u64 = position.into();
+        let leaf: [u8; 32] = leaf.to_bytes();
+        let ommers: Vec<[u8; 32]> = ommers.into_iter().map(|ommer| ommer.to_bytes()).collect();
+        let ommers_bytes: Vec<u8> = bincode::serialize(&ommers).into_diagnostic()?;
+        self.conn
+            .execute(
+                "INSERT INTO frontier (position, leaf, ommers) VALUES (?1, ?2, ?3)",
+                (position, leaf, ommers_bytes),
+            )
+            .into_diagnostic()?;
+        todo!();
+    }
+
+    pub fn insert_nullifier(&self, nullifier: &Nullifier) -> miette::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO nullifiers (nullifier) VALUES (?1)",
+                [nullifier.to_bytes()],
+            )
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    pub fn store_block(&self, anchor: &Anchor, block: &Block) -> miette::Result<()> {
+        let block_bytes = bincode::serialize(block).into_diagnostic()?;
+        self.conn
+            .execute(
+                "INSERT INTO blocks (anchor, block) VALUES (?1, ?2)",
+                (anchor.to_bytes(), block_bytes),
+            )
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    pub fn clear_transactions(&self) -> miette::Result<()> {
+        self.conn
+            .execute("DELETE FROM transactions", [])
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    pub fn connect_block(&self, block: &Block) -> miette::Result<Anchor> {
+        // TODO: Check that nullifiers don't exist.
+        // TODO: Validate zkSNARK, authorizing signature, binding signature
+        let nullifiers = block.nullifiers();
+        for nullifier in &nullifiers {
+            self.insert_nullifier(nullifier)?;
+        }
+
+        let commitments = block.extracted_note_commitments();
+        let frontier = self.get_frontier()?;
+        let anchor: MerkleHashOrchard = match frontier {
+            Some(mut frontier) => {
+                for cmx in &commitments {
+                    let leaf = MerkleHashOrchard::from_cmx(cmx);
+                    frontier.append(leaf);
+                }
+                let anchor = frontier.root(None);
+                self.update_frontier(frontier)?;
+                anchor
+            }
+            None => {
+                let cmx = &commitments[0];
+                let leaf = MerkleHashOrchard::from_cmx(cmx);
+                let mut frontier = NonEmptyFrontier::new(leaf);
+                for cmx in &commitments[1..] {
+                    let leaf = MerkleHashOrchard::from_cmx(cmx);
+                    frontier.append(leaf);
+                }
+                let anchor = frontier.root(None);
+                self.update_frontier(frontier)?;
+                anchor
+            }
+        };
+        let anchor = Anchor::from(anchor);
         Ok(anchor)
     }
 
     pub fn mine(&self) -> miette::Result<()> {
-        let anchor = self.get_last_anchor()?;
-        dbg!(&anchor);
         let transactions = self.get_transactions()?;
         if transactions.len() == 0 {
             return Ok(());
         }
-        let mut commitments = vec![];
-        for transaction in &transactions {
-            for action in &transaction.actions {
-                let action = Action::from(action);
-                let cmx = action.cmx().clone();
-                commitments.push(cmx);
-            }
-        }
-        dbg!(commitments);
+        let block = Block { transactions };
 
-        let mut frontier = Frontier::<MerkleHashOrchard, NOTE_COMMITMENT_TREE_DEPTH>::empty();
+        let anchor = self.connect_block(&block)?;
 
-        let transactions = bincode::serialize(&transactions).into_diagnostic()?;
+        self.store_block(&anchor, &block)?;
+        self.clear_transactions()?;
 
-        /*
-        self.conn
-            .execute(
-                "INSERT INTO blocks (anchor, transactions) VALUES (?1, ?2)",
-                (anchor.to_bytes(), &transactions),
-            )
-            .into_diagnostic()?;
-        self.conn
-            .execute("DELETE FROM transactions", [])
-            .into_diagnostic()?;
-        */
         Ok(())
     }
 }
-const NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
