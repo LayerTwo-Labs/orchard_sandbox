@@ -1,3 +1,5 @@
+use core::slice::SlicePattern;
+
 use bip39::{Mnemonic, Seed};
 use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
@@ -328,26 +330,59 @@ impl Db {
     pub fn validate_transaction(
         tx: &rusqlite::Transaction,
         transaction: &crate::types::Transaction,
-    ) -> miette::Result<()> {
+    ) -> miette::Result<u64> {
         let nullifiers = transaction.nullifiers();
         for nullifier in &nullifiers {
             if Self::nullifier_exists(&tx, nullifier)? {
                 return Err(miette!("nullifier exists, note is already spent"));
             }
         }
-        // We need an anchor that is a few blocks old in order to construct an Orchard bundle.
-        let anchor = match tx.query_row(
-            "SELECT anchor FROM blocks ORDER BY id LIMIT 1 OFFSET 3",
-            [],
-            |row| row.get(0),
-        ) {
-            Ok(anchor) => Anchor::from_bytes(anchor)
-                .expect("subtle error, failed to construct anchor from bytes"),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Anchor::empty_tree(),
-            Err(err) => return Err(err).into_diagnostic(),
+        let bundle = {
+            // We need an anchor that is a few blocks old in order to construct an Orchard bundle.
+            let anchor = match tx.query_row(
+                "SELECT anchor FROM blocks ORDER BY id LIMIT 1 OFFSET 3",
+                [],
+                |row| row.get(0),
+            ) {
+                Ok(anchor) => Anchor::from_bytes(anchor)
+                    .expect("subtle error, failed to construct anchor from bytes"),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Anchor::empty_tree(),
+                Err(err) => return Err(err).into_diagnostic(),
+            };
+            transaction.to_bundle(anchor)
         };
-        let bundle = transaction.to_bundle(anchor);
-        Ok(())
+
+        let mut value_in = 0;
+        for input in &transaction.inputs {
+            let value: i64 = tx
+                .query_row("SELECT value FROM utxos WHERE id = ?1", [input], |row| {
+                    row.get(0)
+                })
+                .into_diagnostic()?;
+            value_in += value;
+        }
+
+        let mut value_out = 0;
+        for output in &transaction.outputs {
+            value_out += output.value as i64;
+        }
+
+        /*
+        A positive Orchard balancing value takes value from the Orchard transaction value pool and
+        adds it to the transparent transaction value pool. A negative Orchard balancing value does
+        the reverse. As a result, positive value_balance_orchard is treated like an input to the
+        transparent transaction value pool, whereas negative value_balance_orchard is treated like
+        an output from that pool.
+        */
+
+        let value_balance_orchard = transaction.value_balance_orchard;
+
+        let fee = value_in + value_balance_orchard - value_out;
+        if fee < 0 {
+            return Err(miette!("transaction fee is negative"));
+        }
+
+        Ok(fee as u64)
     }
 
     fn connect_block(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<Anchor> {

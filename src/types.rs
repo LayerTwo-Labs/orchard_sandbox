@@ -35,7 +35,7 @@ impl Block {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Output {
-    value: u64,
+    pub value: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
