@@ -7,9 +7,7 @@ use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
-
     let mut db = db::Db::new()?;
-
     match &cli.command {
         cli::Commands::Wallet => {
             let tx = db.conn.transaction().into_diagnostic()?;
@@ -18,6 +16,12 @@ fn main() -> miette::Result<()> {
                 let recipient = bs58::encode(recipient).with_check().into_string();
                 println!("{recipient}: {value}");
             }
+        }
+        cli::Commands::CreateUtxo { value } => {
+            todo!();
+        }
+        cli::Commands::SpendUtxo { id } => {
+            todo!();
         }
         cli::Commands::CreateNote { value, recipient } => {
             db.create_note(recipient.clone(), *value)?;
