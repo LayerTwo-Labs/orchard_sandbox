@@ -74,6 +74,7 @@ impl Db {
             M::up(
                 "CREATE TABLE blocks(
                     id INTEGER PRIMARY KEY,
+                    fee INTEGER NOT NULL,
                     anchor BLOB NOT NULL,
                     block BLOB NOT NULL
             );",
@@ -431,12 +432,13 @@ impl Db {
     fn store_block(
         tx: &rusqlite::Transaction,
         anchor: &Anchor,
+        fee: u64,
         block: &Block,
     ) -> miette::Result<()> {
         let block_bytes = bincode::serialize(block).into_diagnostic()?;
         tx.execute(
-            "INSERT INTO blocks (anchor, block) VALUES (?1, ?2)",
-            (anchor.to_bytes(), block_bytes),
+            "INSERT INTO blocks (fee, anchor, block) VALUES (?1, ?2, ?3)",
+            (fee, anchor.to_bytes(), block_bytes),
         )
         .into_diagnostic()?;
         Ok(())
@@ -496,54 +498,69 @@ impl Db {
         Ok(fee as u64)
     }
 
-    fn connect_block(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<Anchor> {
+    fn connect_block(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<(Anchor, u64)> {
+        // Updating transparent state.
+        let mut total_fee = 0;
         for transaction in &block.transactions {
-            Self::validate_transaction(tx, transaction)?;
+            let fee = Self::validate_transaction(tx, transaction)?;
+            total_fee += fee;
+            for input in &transaction.inputs {
+                tx.execute("DELETE FROM utxos WHERE id = ?1", [input])
+                    .into_diagnostic()?;
+            }
+            for output in &transaction.outputs {
+                tx.execute("INSERT INTO utxos (value) VALUES (?1)", [output.value])
+                    .into_diagnostic()?;
+            }
         }
-        // TODO: Validate zkSNARK, authorizing signature, binding signature
-        let nullifiers = block.nullifiers();
-        for nullifier in &nullifiers {
-            // If the same note is spent in the same block this will fail.
-            if Self::nullifier_exists(&tx, nullifier)? {
-                return Err(miette!("nullifier exists, note is already spent"));
-            }
-            Self::insert_nullifier(&tx, nullifier)?;
-        }
-        let commitments = block.extracted_note_commitments();
-        let frontier = Self::get_frontier(&tx)?;
-        let anchor: Anchor = match frontier {
-            Some(mut frontier) => {
-                if commitments.is_empty() {
-                    Anchor::empty_tree()
-                } else {
-                    for cmx in &commitments {
-                        let leaf = MerkleHashOrchard::from_cmx(cmx);
-                        frontier.append(leaf);
-                    }
-                    let anchor = frontier.root(None);
-                    Self::update_frontier(&tx, frontier)?;
-                    anchor.into()
+
+        // Updating Orchard state.
+        let anchor = {
+            // TODO: Validate zkSNARK, authorizing signature, binding signature
+            let nullifiers = block.nullifiers();
+            for nullifier in &nullifiers {
+                // If the same note is spent in the same block this will fail.
+                if Self::nullifier_exists(&tx, nullifier)? {
+                    return Err(miette!("nullifier exists, note is already spent"));
                 }
+                Self::insert_nullifier(&tx, nullifier)?;
             }
-            None => {
-                if commitments.is_empty() {
-                    Anchor::empty_tree()
-                } else {
-                    let cmx = &commitments[0];
-                    let leaf = MerkleHashOrchard::from_cmx(cmx);
-                    let mut frontier = NonEmptyFrontier::new(leaf);
-                    for cmx in &commitments[1..] {
-                        let leaf = MerkleHashOrchard::from_cmx(cmx);
-                        frontier.append(leaf);
+            let commitments = block.extracted_note_commitments();
+            let frontier = Self::get_frontier(&tx)?;
+            let anchor: Anchor = match frontier {
+                Some(mut frontier) => {
+                    if commitments.is_empty() {
+                        Anchor::empty_tree()
+                    } else {
+                        for cmx in &commitments {
+                            let leaf = MerkleHashOrchard::from_cmx(cmx);
+                            frontier.append(leaf);
+                        }
+                        let anchor = frontier.root(None);
+                        Self::update_frontier(&tx, frontier)?;
+                        anchor.into()
                     }
-                    let anchor = frontier.root(None);
-                    Self::update_frontier(&tx, frontier)?;
-                    anchor.into()
                 }
-            }
+                None => {
+                    if commitments.is_empty() {
+                        Anchor::empty_tree()
+                    } else {
+                        let cmx = &commitments[0];
+                        let leaf = MerkleHashOrchard::from_cmx(cmx);
+                        let mut frontier = NonEmptyFrontier::new(leaf);
+                        for cmx in &commitments[1..] {
+                            let leaf = MerkleHashOrchard::from_cmx(cmx);
+                            frontier.append(leaf);
+                        }
+                        let anchor = frontier.root(None);
+                        Self::update_frontier(&tx, frontier)?;
+                        anchor.into()
+                    }
+                }
+            };
+            Anchor::from(anchor)
         };
-        let anchor = Anchor::from(anchor);
-        Ok(anchor)
+        Ok((anchor, total_fee))
     }
 
     pub fn mine(&mut self) -> miette::Result<()> {
@@ -553,8 +570,8 @@ impl Db {
             return Ok(());
         }
         let block = Block { transactions };
-        let anchor = Self::connect_block(&tx, &block)?;
-        Self::store_block(&tx, &anchor, &block)?;
+        let (anchor, total_fee) = Self::connect_block(&tx, &block)?;
+        Self::store_block(&tx, &anchor, total_fee, &block)?;
         Self::clear_transactions(&tx)?;
         tx.commit().into_diagnostic()?;
         Ok(())
@@ -661,5 +678,14 @@ impl Db {
             .collect::<Result<Vec<_>, _>>()
             .into_diagnostic()?;
         Ok(utxos)
+    }
+
+    pub fn get_utxo_value(tx: &rusqlite::Transaction, id: u32) -> miette::Result<u64> {
+        let value = tx
+            .query_row("SELECT value FROM utxos WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .into_diagnostic()?;
+        Ok(value)
     }
 }

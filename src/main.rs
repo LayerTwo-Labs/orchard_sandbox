@@ -10,32 +10,73 @@ fn main() -> miette::Result<()> {
     let mut db = db::Db::new()?;
     match &cli.command {
         cli::Commands::Wallet => {
+            let mut transparent_value_in = 0;
+            let mut transparent_value_out = 0;
+
             let tx = db.conn.transaction().into_diagnostic()?;
             let inputs = db::Db::get_inputs(&tx)?;
             println!("Inputs: ");
             for utxo_id in inputs {
-                println!("utxo_id: {utxo_id}");
+                let value = db::Db::get_utxo_value(&tx, utxo_id)?;
+                println!("utxo_id: {utxo_id} value: {value}");
+
+                transparent_value_in += value;
             }
             let outputs = db::Db::get_outputs(&tx)?;
+
+            println!();
+
             println!("Outputs: ");
             for output in outputs {
                 println!("value: {}", output.value);
+
+                transparent_value_out += output.value;
             }
 
             println!();
 
+            println!("Transparent value in: {transparent_value_in}");
+            println!("Transparent value out: {transparent_value_out}");
+
+            println!();
+
+            let mut shielded_value_in = 0;
+            let mut shielded_value_out = 0;
+
             println!("Shielded inputs: ");
             let shielded_inputs = db::Db::get_shielded_inputs(&tx)?;
             for note_id in &shielded_inputs {
-                println!("note_id: {note_id}");
+                let (note, _) = db::Db::get_note(&tx, *note_id)?;
+                let value = note.value().inner();
+                println!("note_id: {note_id} value: {value}");
+
+                shielded_value_in += value;
             }
 
             let shielded_outputs = db::Db::get_shielded_outputs(&tx)?;
+
+            println!();
+
             println!("Shielded outputs: ");
             for (recipient, value) in shielded_outputs {
                 let recipient = bs58::encode(recipient).with_check().into_string();
                 println!("recipient: {recipient}, value: {value}");
+
+                shielded_value_out += value;
             }
+
+            println!();
+
+            println!("Sielded value in: {shielded_value_in}");
+            println!("Sielded value out: {shielded_value_out}");
+
+            let fee = transparent_value_in as i64 + shielded_value_in as i64
+                - transparent_value_out as i64
+                - shielded_value_out as i64;
+
+            println!();
+
+            println!("Transaction fee: {fee}");
         }
         cli::Commands::CreateUtxo { value } => {
             db.create_utxo(*value)?;
