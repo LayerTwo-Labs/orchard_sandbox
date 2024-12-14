@@ -11,7 +11,7 @@ fn main() -> miette::Result<()> {
     match &cli.command {
         cli::Commands::Wallet => {
             let tx = db.conn.transaction().into_diagnostic()?;
-            let outputs = db::Db::get_outputs(&tx)?;
+            let outputs = db::Db::get_shielded_outputs(&tx)?;
             for (recipient, value) in outputs {
                 let recipient = bs58::encode(recipient).with_check().into_string();
                 println!("{recipient}: {value}");

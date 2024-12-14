@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 use zip32::AccountId;
 
-use crate::types::Block;
+use crate::types::{Block, Output};
 
 pub struct Db {
     pub conn: Connection,
@@ -120,7 +120,38 @@ impl Db {
         Ok(db)
     }
 
-    pub fn get_outputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<(Vec<u8>, u64)>> {
+    pub fn get_inputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<u32>> {
+        let mut statement = tx.prepare("SELECT utxo_id FROM inputs").into_diagnostic()?;
+        let inputs: Vec<u32> = statement
+            .query_map([], |row| Ok(row.get(0)?))
+            .into_diagnostic()?
+            .collect::<Result<Vec<_>, _>>()
+            .into_diagnostic()?;
+        Ok(inputs)
+    }
+
+    pub fn get_outputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<Output>> {
+        let mut statement = tx.prepare("SELECT value FROM outputs").into_diagnostic()?;
+        let outputs: Vec<u64> = statement
+            .query_map([], |row| Ok(row.get(0)?))
+            .into_diagnostic()?
+            .collect::<Result<Vec<_>, _>>()
+            .into_diagnostic()?;
+        let outputs: Vec<Output> = outputs.into_iter().map(|value| Output { value }).collect();
+        Ok(outputs)
+    }
+
+    pub fn get_shielded_inputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<u32>> {
+        let mut statement = tx.prepare("SELECT note_id FROM inputs").into_diagnostic()?;
+        let outputs: Vec<u32> = statement
+            .query_map([], |row| Ok(row.get(0)?))
+            .into_diagnostic()?
+            .collect::<Result<Vec<_>, _>>()
+            .into_diagnostic()?;
+        Ok(outputs)
+    }
+
+    pub fn get_shielded_outputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<(Vec<u8>, u64)>> {
         let mut statement = tx
             .prepare("SELECT recipient, value FROM shielded_outputs")
             .into_diagnostic()?;
@@ -198,7 +229,6 @@ impl Db {
 
     pub fn submit_transaction(&mut self) -> miette::Result<()> {
         let tx = self.conn.transaction().into_diagnostic()?;
-        let outputs = Self::get_outputs(&tx)?;
         let anchor: Anchor = Self::get_bundle_anchor(&tx)?;
         let mut builder = orchard::builder::Builder::new(
             BundleType::Transactional {
@@ -207,7 +237,10 @@ impl Db {
             },
             anchor,
         );
-        for (recipient, value) in outputs {
+        // TODO: Implement Spends
+        // let shielded_inputs = Self::get_shielded_inputs(&tx)?;
+        let shielded_outputs = Self::get_shielded_outputs(&tx)?;
+        for (recipient, value) in shielded_outputs {
             let recipient: [u8; 43] = recipient
                 .try_into()
                 .map_err(|_err| miette!("wrong address length"))?;
@@ -221,8 +254,8 @@ impl Db {
         let rng = rand::rngs::StdRng::from_entropy();
         let (bundle, _bundle_metadata) = builder.build::<i64>(rng).into_diagnostic()?.unwrap();
 
-        let inputs = vec![];
-        let outputs = vec![];
+        let inputs = Self::get_inputs(&tx)?;
+        let outputs = Self::get_outputs(&tx)?;
         let transaction = crate::types::Transaction::from_bundle(inputs, outputs, &bundle);
 
         let transaction_bytes = bincode::serialize(&transaction).into_diagnostic()?;
