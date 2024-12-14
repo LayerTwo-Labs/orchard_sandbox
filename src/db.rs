@@ -1,5 +1,3 @@
-use core::slice::SlicePattern;
-
 use bip39::{Mnemonic, Seed};
 use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
