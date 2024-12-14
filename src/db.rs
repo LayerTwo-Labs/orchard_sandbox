@@ -1,3 +1,4 @@
+use crate::types::{Block, Output};
 use bip39::{Mnemonic, Seed};
 use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
@@ -13,8 +14,6 @@ use rand::SeedableRng;
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 use zip32::AccountId;
-
-use crate::types::{Block, Output};
 
 pub struct Db {
     pub conn: Connection,
@@ -460,7 +459,7 @@ impl Db {
                 return Err(miette!("nullifier exists, note is already spent"));
             }
         }
-        let bundle = {
+        let _bundle = {
             let anchor = Self::get_bundle_anchor(tx)?;
             transaction.to_bundle(anchor)
         };
