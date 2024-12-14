@@ -56,7 +56,8 @@ fn main() -> miette::Result<()> {
             db.mine()?;
         }
         cli::Commands::GetMnemonic => {
-            let mnemonic = db.get_mnemonic()?;
+            let tx = db.conn.transaction().into_diagnostic()?;
+            let mnemonic = db::Db::get_mnemonic(&tx)?;
             let phrase = mnemonic.phrase().to_string();
             println!("{phrase}");
         }

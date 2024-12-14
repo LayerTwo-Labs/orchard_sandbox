@@ -115,11 +115,13 @@ impl Db {
         // 2️⃣ Update the database schema, atomically
         migrations.to_latest(&mut conn).into_diagnostic()?;
 
-        let db = Db { conn };
+        let mut db = Db { conn };
 
-        if !db.get_mnemonic().is_ok() {
-            db.generate_seed()?;
+        let tx = db.conn.transaction().into_diagnostic()?;
+        if !Db::get_mnemonic(&tx).is_ok() {
+            Db::generate_seed(&tx)?;
         }
+        tx.commit().into_diagnostic()?;
 
         Ok(db)
     }
@@ -183,7 +185,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn create_note(&self, recipient: Option<String>, value: i64) -> miette::Result<()> {
+    pub fn create_note(&mut self, recipient: Option<String>, value: i64) -> miette::Result<()> {
         let recipient = match recipient {
             Some(recipient) => {
                 let recipient = bs58::decode(recipient).into_vec().into_diagnostic()?;
@@ -280,8 +282,15 @@ impl Db {
             },
             anchor,
         );
-        // TODO: Implement Spends
-        // let shielded_inputs = Self::get_shielded_inputs(&tx)?;
+        let shielded_inputs = Self::get_shielded_inputs(&tx)?;
+        for note_id in shielded_inputs {
+            let (note, merkle_path) = Self::get_note(&tx, note_id)?;
+            let sk = Self::get_sk(&tx)?;
+            let fvk = orchard::keys::FullViewingKey::from(&sk);
+            builder
+                .add_spend(fvk, note, merkle_path)
+                .into_diagnostic()?;
+        }
         let shielded_outputs = Self::get_shielded_outputs(&tx)?;
         for (recipient, value) in shielded_outputs {
             let recipient: [u8; 43] = recipient
@@ -551,18 +560,16 @@ impl Db {
         Ok(())
     }
 
-    fn generate_seed(&self) -> miette::Result<()> {
+    fn generate_seed(tx: &rusqlite::Transaction) -> miette::Result<()> {
         let mnemonic = Mnemonic::new(bip39::MnemonicType::Words12, bip39::Language::English);
         let phrase = mnemonic.phrase().to_string();
-        self.conn
-            .execute("INSERT INTO wallet_seed (phrase) VALUES (?1)", [phrase])
+        tx.execute("INSERT INTO wallet_seed (phrase) VALUES (?1)", [phrase])
             .into_diagnostic()?;
         Ok(())
     }
 
-    pub fn get_mnemonic(&self) -> miette::Result<Mnemonic> {
-        let phrase: String = self
-            .conn
+    pub fn get_mnemonic(tx: &rusqlite::Transaction) -> miette::Result<Mnemonic> {
+        let phrase: String = tx
             .query_row("SELECT phrase FROM wallet_seed", [], |row| row.get(0))
             .into_diagnostic()?;
         let mnemonic =
@@ -570,14 +577,20 @@ impl Db {
         Ok(mnemonic)
     }
 
-    pub fn get_new_address(&self) -> miette::Result<Address> {
-        let mnemonic = self.get_mnemonic()?;
+    pub fn get_sk(tx: &rusqlite::Transaction) -> miette::Result<orchard::keys::SpendingKey> {
+        let mnemonic = Self::get_mnemonic(tx)?;
         let seed = Seed::new(&mnemonic, "");
         let seed_bytes = seed.as_bytes();
         let sk = orchard::keys::SpendingKey::from_zip32_seed(seed_bytes, 0, AccountId::ZERO)
             .expect("couldn't derive spending key from seed");
+        Ok(sk)
+    }
 
-        let index: u32 = match self.conn.query_row(
+    pub fn get_new_address(&mut self) -> miette::Result<Address> {
+        let tx = self.conn.transaction().into_diagnostic()?;
+        let sk = Self::get_sk(&tx)?;
+
+        let index: u32 = match tx.query_row(
             "SELECT id FROM addresses ORDER BY id DESC LIMIT 1",
             [],
             |row| row.get(0),
@@ -590,12 +603,12 @@ impl Db {
         let fvk = orchard::keys::FullViewingKey::from(&sk);
         let address = fvk.address_at(index + 1, zip32::Scope::External);
 
-        self.conn
-            .execute(
-                "INSERT INTO addresses (address) VALUES (?)",
-                [address.to_raw_address_bytes()],
-            )
-            .into_diagnostic()?;
+        tx.execute(
+            "INSERT INTO addresses (address) VALUES (?)",
+            [address.to_raw_address_bytes()],
+        )
+        .into_diagnostic()?;
+        tx.commit().into_diagnostic()?;
 
         Ok(address)
     }
