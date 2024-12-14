@@ -2,12 +2,7 @@ use bip39::{Mnemonic, Seed};
 use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
-    builder::BundleType,
-    bundle::Flags,
-    keys::{Diversifier, FullViewingKey, SpendingKey},
-    note::Nullifier,
-    tree::MerkleHashOrchard,
-    value::NoteValue,
+    builder::BundleType, bundle::Flags, note::Nullifier, tree::MerkleHashOrchard, value::NoteValue,
     Address, Anchor,
 };
 use rand::SeedableRng;
@@ -82,12 +77,25 @@ impl Db {
             M::up(
                 "CREATE TABLE inputs(
                     id INTEGER PRIMARY KEY,
+                    utxo_id INTEGER NOT NULL,
+                    FOREIGN KEY(utxo_id) REFERENCES utxos(id)
+            );",
+            ),
+            M::up(
+                "CREATE TABLE outputs(
+                    id INTEGER PRIMARY KEY,
+                    value INTEGER NOT NULL
+            );",
+            ),
+            M::up(
+                "CREATE TABLE shielded_inputs(
+                    id INTEGER PRIMARY KEY,
                     note_id INTEGER NOT NULL,
                     FOREIGN KEY(note_id) REFERENCES notes(id)
             );",
             ),
             M::up(
-                "CREATE TABLE outputs(
+                "CREATE TABLE shielded_outputs(
                     id INTEGER PRIMARY KEY,
                     recipient BLOB NOT NULL,
                     value INTEGER NOT NULL
@@ -114,7 +122,7 @@ impl Db {
 
     pub fn get_outputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<(Vec<u8>, u64)>> {
         let mut statement = tx
-            .prepare("SELECT recipient, value FROM outputs")
+            .prepare("SELECT recipient, value FROM shielded_outputs")
             .into_diagnostic()?;
         let outputs: Vec<_> = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -122,6 +130,20 @@ impl Db {
             .collect::<Result<Vec<_>, _>>()
             .into_diagnostic()?;
         Ok(outputs)
+    }
+
+    pub fn create_utxo(&self, value: u64) -> miette::Result<()> {
+        self.conn
+            .execute("INSERT INTO outputs (value) VALUES (?1)", [value])
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    pub fn spend_utxo(&self, utxo_id: u32) -> miette::Result<()> {
+        self.conn
+            .execute("INSERT INTO inputs (utxo_id) VALUES (?1)", [utxo_id])
+            .into_diagnostic()?;
+        Ok(())
     }
 
     pub fn create_note(&self, recipient: Option<String>, value: i64) -> miette::Result<()> {
@@ -142,8 +164,18 @@ impl Db {
         };
         self.conn
             .execute(
-                "INSERT INTO outputs (recipient, value) VALUES (?1, ?2)",
+                "INSERT INTO shielded_outputs (recipient, value) VALUES (?1, ?2)",
                 (recipient, value),
+            )
+            .into_diagnostic()?;
+        Ok(())
+    }
+
+    pub fn spend_note(&self, note_id: u32) -> miette::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO shielded_inputs (note_id) VALUES (?1)",
+                [note_id],
             )
             .into_diagnostic()?;
         Ok(())
@@ -202,6 +234,10 @@ impl Db {
         .into_diagnostic()?;
         tx.execute("DELETE FROM inputs", []).into_diagnostic()?;
         tx.execute("DELETE FROM outputs", []).into_diagnostic()?;
+        tx.execute("DELETE FROM shielded_inputs", [])
+            .into_diagnostic()?;
+        tx.execute("DELETE FROM shielded_outputs", [])
+            .into_diagnostic()?;
 
         tx.commit().into_diagnostic()?;
 

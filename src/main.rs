@@ -18,15 +18,17 @@ fn main() -> miette::Result<()> {
             }
         }
         cli::Commands::CreateUtxo { value } => {
-            todo!();
+            db.create_utxo(*value)?;
         }
-        cli::Commands::SpendUtxo { id } => {
-            todo!();
+        cli::Commands::SpendUtxo { utxo_id } => {
+            db.spend_utxo(*utxo_id)?;
         }
         cli::Commands::CreateNote { value, recipient } => {
             db.create_note(recipient.clone(), *value)?;
         }
-        cli::Commands::SpendNote { .. } => {}
+        cli::Commands::SpendNote { note_id } => {
+            db.spend_note(*note_id)?;
+        }
         cli::Commands::SubmitTxn => {
             db.submit_transaction()?;
         }

@@ -14,14 +14,14 @@ pub enum Commands {
     /// Create a new transparent utxo in pending transaction
     CreateUtxo { value: u64 },
     /// Create spend an existing transparent utxo in pending transaction
-    SpendUtxo { id: u32 },
+    SpendUtxo { utxo_id: u32 },
     /// Create a new note in pending transaction
     CreateNote {
         value: i64,
         recipient: Option<String>,
     },
     /// Spend a note in pending transaction
-    SpendNote { id: u32 },
+    SpendNote { note_id: u32 },
     /// Submit pending transaction to mempool
     SubmitTxn,
     /// Mine a block
