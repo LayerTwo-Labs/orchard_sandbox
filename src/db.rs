@@ -131,15 +131,12 @@ impl Db {
                 let recipient: [u8; 43] = recipient
                     .try_into()
                     .map_err(|_err| miette!("wrong address length"))?;
+                let _ = Address::from_raw_address_bytes(&recipient)
+                    .expect("subtle error, failed to construct shielded address from raw bytes");
                 recipient
             }
             None => {
-                let seed = [0; 32];
-                let sk = SpendingKey::from_zip32_seed(&seed, 0, AccountId::ZERO).unwrap();
-                let full_viewing_key = FullViewingKey::from(&sk);
-                let diversifier = Diversifier::from_bytes([0; 11]);
-                let recipient =
-                    full_viewing_key.address(diversifier, orchard::keys::Scope::Internal);
+                let recipient = self.get_new_address()?;
                 recipient.to_raw_address_bytes()
             }
         };

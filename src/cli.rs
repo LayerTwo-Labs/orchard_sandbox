@@ -11,10 +11,10 @@ pub struct Cli {
 pub enum Commands {
     /// Print out wallet data
     Wallet,
-    /// Create spend an existing transparent utxo in pending transaction
-    SpendUtxo { id: u32 },
     /// Create a new transparent utxo in pending transaction
     CreateUtxo { value: u64 },
+    /// Create spend an existing transparent utxo in pending transaction
+    SpendUtxo { id: u32 },
     /// Create a new note in pending transaction
     CreateNote {
         value: i64,
