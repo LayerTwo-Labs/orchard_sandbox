@@ -1,3 +1,4 @@
+use bip39::{Mnemonic, Seed};
 use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
@@ -197,9 +198,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_transactions(&self) -> miette::Result<Vec<crate::types::Transaction>> {
-        let mut statement = self
-            .conn
+    fn get_transactions(
+        tx: &rusqlite::Transaction,
+    ) -> miette::Result<Vec<crate::types::Transaction>> {
+        let mut statement = tx
             .prepare("SELECT tx FROM transactions")
             .into_diagnostic()?;
         let transactions: Vec<Vec<u8>> = statement
@@ -215,13 +217,13 @@ impl Db {
         Ok(transactions)
     }
 
-    pub fn get_frontier(&self) -> miette::Result<Option<NonEmptyFrontier<MerkleHashOrchard>>> {
+    fn get_frontier(
+        tx: &rusqlite::Transaction,
+    ) -> miette::Result<Option<NonEmptyFrontier<MerkleHashOrchard>>> {
         let (position, leaf, ommers): (u64, Vec<u8>, Vec<u8>) =
-            match self
-                .conn
-                .query_row("SELECT position, leaf, ommers FROM frontier", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                }) {
+            match tx.query_row("SELECT position, leaf, ommers FROM frontier", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }) {
                 Ok((position, leaf, ommers)) => (position, leaf, ommers),
                 Err(rusqlite::Error::QueryReturnedNoRows) => {
                     return Ok(None);
@@ -249,40 +251,36 @@ impl Db {
         Ok(Some(frontier))
     }
 
-    pub fn update_frontier(
-        &self,
+    fn update_frontier(
+        tx: &rusqlite::Transaction,
         frontier: NonEmptyFrontier<MerkleHashOrchard>,
     ) -> miette::Result<()> {
-        self.conn
-            .execute("DELETE FROM frontier", [])
-            .into_diagnostic()?;
+        tx.execute("DELETE FROM frontier", []).into_diagnostic()?;
         let (position, leaf, ommers) = frontier.into_parts();
         let position: u64 = position.into();
         let leaf: [u8; 32] = leaf.to_bytes();
         let ommers: Vec<[u8; 32]> = ommers.into_iter().map(|ommer| ommer.to_bytes()).collect();
         let ommers_bytes: Vec<u8> = bincode::serialize(&ommers).into_diagnostic()?;
-        self.conn
-            .execute(
-                "INSERT INTO frontier (position, leaf, ommers) VALUES (?1, ?2, ?3)",
-                (position, leaf, ommers_bytes),
-            )
-            .into_diagnostic()?;
-        todo!();
-    }
-
-    pub fn insert_nullifier(&self, nullifier: &Nullifier) -> miette::Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO nullifiers (nullifier) VALUES (?1)",
-                [nullifier.to_bytes()],
-            )
-            .into_diagnostic()?;
+        tx.execute(
+            "INSERT INTO frontier (position, leaf, ommers) VALUES (?1, ?2, ?3)",
+            (position, leaf, ommers_bytes),
+        )
+        .into_diagnostic()?;
         Ok(())
     }
 
-    pub fn nullifier_exists(&self, nullifier: &Nullifier) -> miette::Result<bool> {
+    fn insert_nullifier(tx: &rusqlite::Transaction, nullifier: &Nullifier) -> miette::Result<()> {
+        tx.execute(
+            "INSERT INTO nullifiers (nullifier) VALUES (?1)",
+            [nullifier.to_bytes()],
+        )
+        .into_diagnostic()?;
+        Ok(())
+    }
+
+    fn nullifier_exists(tx: &rusqlite::Transaction, nullifier: &Nullifier) -> miette::Result<bool> {
         let nullifier = nullifier.to_bytes();
-        let nullifier_exists = match self.conn.query_row(
+        let nullifier_exists = match tx.query_row(
             "SELECT nullifier FROM nullifiers WHERE nullifier = ?1",
             [nullifier],
             |row| {
@@ -299,36 +297,54 @@ impl Db {
         Ok(nullifier_exists)
     }
 
-    pub fn store_block(&self, anchor: &Anchor, block: &Block) -> miette::Result<()> {
+    fn store_block(
+        tx: &rusqlite::Transaction,
+        anchor: &Anchor,
+        block: &Block,
+    ) -> miette::Result<()> {
         let block_bytes = bincode::serialize(block).into_diagnostic()?;
-        self.conn
-            .execute(
-                "INSERT INTO blocks (anchor, block) VALUES (?1, ?2)",
-                (anchor.to_bytes(), block_bytes),
-            )
+        tx.execute(
+            "INSERT INTO blocks (anchor, block) VALUES (?1, ?2)",
+            (anchor.to_bytes(), block_bytes),
+        )
+        .into_diagnostic()?;
+        Ok(())
+    }
+
+    fn clear_transactions(tx: &rusqlite::Transaction) -> miette::Result<()> {
+        tx.execute("DELETE FROM transactions", [])
             .into_diagnostic()?;
         Ok(())
     }
 
-    pub fn clear_transactions(&self) -> miette::Result<()> {
-        self.conn
-            .execute("DELETE FROM transactions", [])
-            .into_diagnostic()?;
+    pub fn validate_transaction(
+        tx: &rusqlite::Transaction,
+        transaction: &crate::types::Transaction,
+    ) -> miette::Result<()> {
+        let nullifiers = transaction.nullifiers();
+        for nullifier in &nullifiers {
+            if Self::nullifier_exists(&tx, nullifier)? {
+                return Err(miette!("nullifier exists, note is already spent"));
+            }
+        }
         Ok(())
     }
 
-    pub fn connect_block(&self, block: &Block) -> miette::Result<Anchor> {
+    fn connect_block(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<Anchor> {
+        for transaction in &block.transactions {
+            Self::validate_transaction(tx, transaction)?;
+        }
         // TODO: Validate zkSNARK, authorizing signature, binding signature
         let nullifiers = block.nullifiers();
         for nullifier in &nullifiers {
-            if self.nullifier_exists(nullifier)? {
+            // If the same note is spent in the same block this will fail.
+            if Self::nullifier_exists(&tx, nullifier)? {
                 return Err(miette!("nullifier exists, note is already spent"));
             }
-            self.insert_nullifier(nullifier)?;
+            Self::insert_nullifier(&tx, nullifier)?;
         }
-
         let commitments = block.extracted_note_commitments();
-        let frontier = self.get_frontier()?;
+        let frontier = Self::get_frontier(&tx)?;
         let anchor: Anchor = match frontier {
             Some(mut frontier) => {
                 if commitments.is_empty() {
@@ -339,7 +355,7 @@ impl Db {
                         frontier.append(leaf);
                     }
                     let anchor = frontier.root(None);
-                    self.update_frontier(frontier)?;
+                    Self::update_frontier(&tx, frontier)?;
                     anchor.into()
                 }
             }
@@ -355,7 +371,7 @@ impl Db {
                         frontier.append(leaf);
                     }
                     let anchor = frontier.root(None);
-                    self.update_frontier(frontier)?;
+                    Self::update_frontier(&tx, frontier)?;
                     anchor.into()
                 }
             }
@@ -364,18 +380,17 @@ impl Db {
         Ok(anchor)
     }
 
-    pub fn mine(&self) -> miette::Result<()> {
-        let transactions = self.get_transactions()?;
+    pub fn mine(&mut self) -> miette::Result<()> {
+        let tx = self.conn.transaction().into_diagnostic()?;
+        let transactions = Self::get_transactions(&tx)?;
         if transactions.len() == 0 {
             return Ok(());
         }
         let block = Block { transactions };
-
-        let anchor = self.connect_block(&block)?;
-
-        self.store_block(&anchor, &block)?;
-        self.clear_transactions()?;
-
+        let anchor = Self::connect_block(&tx, &block)?;
+        Self::store_block(&tx, &anchor, &block)?;
+        Self::clear_transactions(&tx)?;
+        tx.commit().into_diagnostic()?;
         Ok(())
     }
 
@@ -406,11 +421,6 @@ impl Db {
         let mnemonic = self.get_mnemonic()?;
         let seed = Seed::new(&mnemonic, "");
         let seed_bytes = seed.as_bytes();
-        /*
-        let master_key: zip32::hardened_only::HardenedOnlyKey<OrchardContext> =
-            zip32::hardened_only::HardenedOnlyKey::master(&[seed_bytes]);
-        */
-
         let sk = orchard::keys::SpendingKey::from_zip32_seed(seed_bytes, 0, AccountId::ZERO)
             .expect("couldn't derive spending key from seed");
 
@@ -437,15 +447,4 @@ impl Db {
 
         Ok(address)
     }
-}
-
-use bip39::{Mnemonic, Seed};
-
-#[derive(Debug)]
-struct OrchardContext;
-
-impl zip32::hardened_only::Context for OrchardContext {
-    const MKG_DOMAIN: [u8; 16] = *b"ZsideIP32Orchard";
-    const CKD_DOMAIN: zcash_spec::PrfExpand<([u8; 32], [u8; 4])> =
-        zcash_spec::PrfExpand::ORCHARD_ZIP32_CHILD;
 }

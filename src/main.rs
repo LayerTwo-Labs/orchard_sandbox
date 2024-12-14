@@ -7,7 +7,7 @@ use clap::Parser as _;
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
 
-    let db = db::Db::new()?;
+    let mut db = db::Db::new()?;
 
     match &cli.command {
         cli::Commands::Wallet => {

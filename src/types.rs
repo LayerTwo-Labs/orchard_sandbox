@@ -15,11 +15,8 @@ impl Block {
     pub fn nullifiers(&self) -> Vec<Nullifier> {
         let mut nullifiers = vec![];
         for transaction in &self.transactions {
-            for action in &transaction.actions {
-                let action = orchard::Action::from(action);
-                let nullifier = action.nullifier();
-                nullifiers.push(*nullifier);
-            }
+            let transaction_nullifiers = transaction.nullifiers();
+            nullifiers.extend(transaction_nullifiers);
         }
         nullifiers
     }
@@ -29,11 +26,8 @@ impl Block {
     pub fn extracted_note_commitments(&self) -> Vec<ExtractedNoteCommitment> {
         let mut extracted_note_commitments = vec![];
         for transaction in &self.transactions {
-            for action in &transaction.actions {
-                let action = orchard::Action::from(action);
-                let extracted_note_commitment = action.cmx();
-                extracted_note_commitments.push(*extracted_note_commitment);
-            }
+            let transaction_commitments = transaction.extracted_note_commitments();
+            extracted_note_commitments.extend(transaction_commitments);
         }
         extracted_note_commitments
     }
@@ -73,6 +67,29 @@ impl Transaction {
             actions,
             value_balance_orchard: *bundle.value_balance(),
         }
+    }
+
+    /// These must be added to the nullifier set when a block is connected.
+    pub fn nullifiers(&self) -> Vec<Nullifier> {
+        let mut nullifiers = vec![];
+        for action in &self.actions {
+            let action = orchard::Action::from(action);
+            let nullifier = action.nullifier();
+            nullifiers.push(*nullifier);
+        }
+        nullifiers
+    }
+
+    /// These must be appended to the incremental note commitment merkle tree when a block is
+    /// connected.
+    pub fn extracted_note_commitments(&self) -> Vec<ExtractedNoteCommitment> {
+        let mut extracted_note_commitments = vec![];
+        for action in &self.actions {
+            let action = orchard::Action::from(action);
+            let extracted_note_commitment = action.cmx();
+            extracted_note_commitments.push(*extracted_note_commitment);
+        }
+        extracted_note_commitments
     }
 }
 
