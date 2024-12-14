@@ -169,7 +169,7 @@ impl Db {
         }
 
         let rng = rand::rngs::StdRng::from_entropy();
-        let (bundle, bundle_metadata) = builder.build::<i64>(rng).into_diagnostic()?.unwrap();
+        let (bundle, _bundle_metadata) = builder.build::<i64>(rng).into_diagnostic()?.unwrap();
         println!("after bundle construction");
 
         dbg!(bundle.value_balance());
@@ -281,19 +281,21 @@ impl Db {
     }
 
     pub fn nullifier_exists(&self, nullifier: &Nullifier) -> miette::Result<bool> {
-        let nullifier_exists =
-            match self
-                .conn
-                .query_row("SELECT nullifier FROM nullifiers", [], |row| {
-                    let nullifier: Vec<u8> = row.get(0)?;
-                    Ok(nullifier)
-                }) {
-                Ok(_) => true,
-                Err(rusqlite::Error::QueryReturnedNoRows) => false,
-                Err(err) => {
-                    return Err(err).into_diagnostic();
-                }
-            };
+        let nullifier = nullifier.to_bytes();
+        let nullifier_exists = match self.conn.query_row(
+            "SELECT nullifier FROM nullifiers WHERE nullifier = ?1",
+            [nullifier],
+            |row| {
+                let nullifier: Vec<u8> = row.get(0)?;
+                Ok(nullifier)
+            },
+        ) {
+            Ok(_) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(err) => {
+                return Err(err).into_diagnostic();
+            }
+        };
         Ok(nullifier_exists)
     }
 

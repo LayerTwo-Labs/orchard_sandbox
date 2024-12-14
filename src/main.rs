@@ -20,7 +20,7 @@ fn main() -> miette::Result<()> {
         cli::Commands::CreateNote { value, recipient } => {
             db.create_note(recipient.clone(), *value)?;
         }
-        cli::Commands::SpendNote { id } => {}
+        cli::Commands::SpendNote { .. } => {}
         cli::Commands::SubmitTxn => {
             db.submit_transaction()?;
         }
