@@ -34,7 +34,14 @@ impl Block {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Output {
+    value: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
+    pub inputs: Vec<u32>,
+    pub outputs: Vec<Output>,
     pub actions: Vec<Action>,
     pub value_balance_orchard: i64,
 }
@@ -57,13 +64,19 @@ impl Transaction {
         orchard::Bundle::from_parts(actions, flags, value_balance_orchard, anchor, authorization)
     }
 
-    pub fn from_bundle<T: Authorization>(bundle: &orchard::bundle::Bundle<T, i64>) -> Self {
+    pub fn from_bundle<T: Authorization>(
+        inputs: Vec<u32>,
+        outputs: Vec<Output>,
+        bundle: &orchard::bundle::Bundle<T, i64>,
+    ) -> Self {
         let mut actions = vec![];
         for action in bundle.actions() {
             let action = Action::from(action);
             actions.push(action);
         }
         Self {
+            inputs,
+            outputs,
             actions,
             value_balance_orchard: *bundle.value_balance(),
         }

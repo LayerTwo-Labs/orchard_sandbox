@@ -26,6 +26,12 @@ impl Db {
         // 1️⃣ Define migrations
         let migrations = Migrations::new(vec![
             M::up(
+                "CREATE TABLE utxos(
+                    id INTEGER PRIMARY KEY,
+                    value INTEGER NOT NULL
+            );",
+            ),
+            M::up(
                 "CREATE TABLE notes(
                     id INTEGER PRIMARY KEY,
                     recipient BLOB NOT NULL,
@@ -175,7 +181,9 @@ impl Db {
 
         dbg!(bundle.value_balance());
 
-        let transaction = crate::types::Transaction::from_bundle(&bundle);
+        let inputs = vec![];
+        let outputs = vec![];
+        let transaction = crate::types::Transaction::from_bundle(inputs, outputs, &bundle);
 
         let transaction_bytes = bincode::serialize(&transaction).into_diagnostic()?;
 
@@ -327,6 +335,18 @@ impl Db {
                 return Err(miette!("nullifier exists, note is already spent"));
             }
         }
+        // We need an anchor that is a few blocks old in order to construct an Orchard bundle.
+        let anchor = match tx.query_row(
+            "SELECT anchor FROM blocks ORDER BY id LIMIT 1 OFFSET 3",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(anchor) => Anchor::from_bytes(anchor)
+                .expect("subtle error, failed to construct anchor from bytes"),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Anchor::empty_tree(),
+            Err(err) => return Err(err).into_diagnostic(),
+        };
+        let bundle = transaction.to_bundle(anchor);
         Ok(())
     }
 
