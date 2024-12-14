@@ -3,6 +3,7 @@ mod db;
 mod types;
 
 use clap::Parser as _;
+use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
@@ -11,7 +12,8 @@ fn main() -> miette::Result<()> {
 
     match &cli.command {
         cli::Commands::Wallet => {
-            let outputs = db.get_outputs()?;
+            let tx = db.conn.transaction().into_diagnostic()?;
+            let outputs = db::Db::get_outputs(&tx)?;
             for (recipient, value) in outputs {
                 let recipient = bs58::encode(recipient).with_check().into_string();
                 println!("{recipient}: {value}");

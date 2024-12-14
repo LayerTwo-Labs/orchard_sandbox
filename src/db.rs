@@ -18,7 +18,7 @@ use zip32::AccountId;
 use crate::types::Block;
 
 pub struct Db {
-    conn: Connection,
+    pub conn: Connection,
 }
 
 impl Db {
@@ -112,9 +112,8 @@ impl Db {
         Ok(db)
     }
 
-    pub fn get_outputs(&self) -> miette::Result<Vec<(Vec<u8>, u64)>> {
-        let mut statement = self
-            .conn
+    pub fn get_outputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<(Vec<u8>, u64)>> {
+        let mut statement = tx
             .prepare("SELECT recipient, value FROM outputs")
             .into_diagnostic()?;
         let outputs: Vec<_> = statement
@@ -153,10 +152,25 @@ impl Db {
         Ok(())
     }
 
-    pub fn submit_transaction(&self) -> miette::Result<()> {
-        let outputs = self.get_outputs()?;
-        // let anchor: Anchor = frontier.root().into();
-        let anchor: Anchor = Anchor::empty_tree();
+    pub fn get_bundle_anchor(tx: &rusqlite::Transaction) -> miette::Result<Anchor> {
+        // We need an anchor that is a few blocks old in order to construct an Orchard bundle.
+        let anchor = match tx.query_row(
+            "SELECT anchor FROM blocks ORDER BY id LIMIT 1 OFFSET 3",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(anchor) => Anchor::from_bytes(anchor)
+                .expect("subtle error, failed to construct anchor from bytes"),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Anchor::empty_tree(),
+            Err(err) => return Err(err).into_diagnostic(),
+        };
+        Ok(anchor)
+    }
+
+    pub fn submit_transaction(&mut self) -> miette::Result<()> {
+        let tx = self.conn.transaction().into_diagnostic()?;
+        let outputs = Self::get_outputs(&tx)?;
+        let anchor: Anchor = Self::get_bundle_anchor(&tx)?;
         let mut builder = orchard::builder::Builder::new(
             BundleType::Transactional {
                 flags: Flags::ENABLED,
@@ -177,9 +191,6 @@ impl Db {
 
         let rng = rand::rngs::StdRng::from_entropy();
         let (bundle, _bundle_metadata) = builder.build::<i64>(rng).into_diagnostic()?.unwrap();
-        println!("after bundle construction");
-
-        dbg!(bundle.value_balance());
 
         let inputs = vec![];
         let outputs = vec![];
@@ -187,21 +198,15 @@ impl Db {
 
         let transaction_bytes = bincode::serialize(&transaction).into_diagnostic()?;
 
-        self.conn
-            .execute(
-                "INSERT INTO transactions (tx) VALUES (?1)",
-                (&transaction_bytes,),
-            )
-            .into_diagnostic()?;
+        tx.execute(
+            "INSERT INTO transactions (tx) VALUES (?1)",
+            (&transaction_bytes,),
+        )
+        .into_diagnostic()?;
+        tx.execute("DELETE FROM inputs", []).into_diagnostic()?;
+        tx.execute("DELETE FROM outputs", []).into_diagnostic()?;
 
-        self.conn
-            .execute("DELETE FROM inputs", [])
-            .into_diagnostic()?;
-        self.conn
-            .execute("DELETE FROM outputs", [])
-            .into_diagnostic()?;
-
-        dbg!(hex::encode(&transaction_bytes));
+        tx.commit().into_diagnostic()?;
 
         Ok(())
     }
@@ -336,17 +341,7 @@ impl Db {
             }
         }
         let bundle = {
-            // We need an anchor that is a few blocks old in order to construct an Orchard bundle.
-            let anchor = match tx.query_row(
-                "SELECT anchor FROM blocks ORDER BY id LIMIT 1 OFFSET 3",
-                [],
-                |row| row.get(0),
-            ) {
-                Ok(anchor) => Anchor::from_bytes(anchor)
-                    .expect("subtle error, failed to construct anchor from bytes"),
-                Err(rusqlite::Error::QueryReturnedNoRows) => Anchor::empty_tree(),
-                Err(err) => return Err(err).into_diagnostic(),
-            };
+            let anchor = Self::get_bundle_anchor(tx)?;
             transaction.to_bundle(anchor)
         };
 
@@ -447,10 +442,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_seed(&self) -> miette::Result<()> {
-        todo!();
-    }
-
     fn generate_seed(&self) -> miette::Result<()> {
         let mnemonic = Mnemonic::new(bip39::MnemonicType::Words12, bip39::Language::English);
         let phrase = mnemonic.phrase().to_string();
@@ -486,7 +477,6 @@ impl Db {
             Err(rusqlite::Error::QueryReturnedNoRows) => 0,
             Err(err) => return Err(err).into_diagnostic(),
         };
-        dbg!(index);
 
         let fvk = orchard::keys::FullViewingKey::from(&sk);
         let address = fvk.address_at(index + 1, zip32::Scope::External);
