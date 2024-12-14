@@ -185,7 +185,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn create_note(&mut self, recipient: Option<String>, value: i64) -> miette::Result<()> {
+    pub fn create_note(&mut self, recipient: Option<String>, value: u64) -> miette::Result<()> {
         let recipient = match recipient {
             Some(recipient) => {
                 let recipient = bs58::decode(recipient).into_vec().into_diagnostic()?;
@@ -611,5 +611,38 @@ impl Db {
         tx.commit().into_diagnostic()?;
 
         Ok(address)
+    }
+
+    pub fn get_total_transparent_value(&self) -> miette::Result<u64> {
+        let total_value: u64 =
+            match self
+                .conn
+                .query_row("SELECT SUM(value) FROM utxos", [], |row| row.get(0))
+            {
+                Ok(total_value) => total_value,
+                Err(rusqlite::Error::InvalidColumnType(..)) => 0,
+                Err(err) => return Err(err).into_diagnostic(),
+            };
+        Ok(total_value)
+    }
+
+    pub fn get_total_shielded_value(&self) -> miette::Result<u64> {
+        let total_value: u64 =
+            match self
+                .conn
+                .query_row("SELECT SUM(value) FROM notes", [], |row| row.get(0))
+            {
+                Ok(total_value) => total_value,
+                Err(rusqlite::Error::InvalidColumnType(..)) => 0,
+                Err(err) => return Err(err).into_diagnostic(),
+            };
+        Ok(total_value)
+    }
+
+    pub fn conjure_utxo(&self, value: u64) -> miette::Result<()> {
+        self.conn
+            .execute("INSERT INTO utxos (value) VALUES (?1)", [value])
+            .into_diagnostic()?;
+        Ok(())
     }
 }

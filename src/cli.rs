@@ -17,7 +17,7 @@ pub enum Commands {
     SpendUtxo { utxo_id: u32 },
     /// Create a new note in pending transaction
     CreateNote {
-        value: i64,
+        value: u64,
         recipient: Option<String>,
     },
     /// Spend a note in pending transaction
@@ -30,4 +30,8 @@ pub enum Commands {
     GetMnemonic,
     /// Get new shielded address
     GetNewAddress,
+    /// Get total transparent and shielded value
+    ValuePools,
+    /// Create a new UTXO out of thin air
+    ConjureUtxo { value: u64 },
 }

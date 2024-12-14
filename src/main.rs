@@ -67,6 +67,16 @@ fn main() -> miette::Result<()> {
             let address_string = bs58::encode(address_bytes).with_check().into_string();
             println!("{address_string}");
         }
+        cli::Commands::ValuePools => {
+            let total_transparent_value = db.get_total_transparent_value()?;
+            println!("Total transparent value: {total_transparent_value}");
+
+            let total_shielded_value = db.get_total_shielded_value()?;
+            println!("Total shielded value: {total_shielded_value}");
+        }
+        cli::Commands::ConjureUtxo { value } => {
+            db.conjure_utxo(*value)?;
+        }
     }
     Ok(())
 }
