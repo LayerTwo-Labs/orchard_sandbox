@@ -77,6 +77,12 @@ fn main() -> miette::Result<()> {
         cli::Commands::ConjureUtxo { value } => {
             db.conjure_utxo(*value)?;
         }
+        cli::Commands::GetUtxos => {
+            let utxos = db.get_utxos()?;
+            for (id, value) in utxos {
+                println!("id: {id} value: {value}");
+            }
+        }
     }
     Ok(())
 }

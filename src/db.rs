@@ -645,4 +645,21 @@ impl Db {
             .into_diagnostic()?;
         Ok(())
     }
+
+    pub fn get_utxos(&self) -> miette::Result<Vec<(u32, u64)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, value FROM utxos")
+            .into_diagnostic()?;
+        let utxos: Vec<(u32, u64)> = statement
+            .query_map([], |row| {
+                let id = row.get(0)?;
+                let value = row.get(1)?;
+                Ok((id, value))
+            })
+            .into_diagnostic()?
+            .collect::<Result<Vec<_>, _>>()
+            .into_diagnostic()?;
+        Ok(utxos)
+    }
 }

@@ -34,4 +34,6 @@ pub enum Commands {
     ValuePools,
     /// Create a new UTXO out of thin air
     ConjureUtxo { value: u64 },
+    /// Get all transparent UTXOs
+    GetUtxos,
 }
