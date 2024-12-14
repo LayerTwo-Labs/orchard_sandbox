@@ -11,10 +11,30 @@ fn main() -> miette::Result<()> {
     match &cli.command {
         cli::Commands::Wallet => {
             let tx = db.conn.transaction().into_diagnostic()?;
-            let outputs = db::Db::get_shielded_outputs(&tx)?;
-            for (recipient, value) in outputs {
+            let inputs = db::Db::get_inputs(&tx)?;
+            println!("Inputs: ");
+            for utxo_id in inputs {
+                println!("utxo_id: {utxo_id}");
+            }
+            let outputs = db::Db::get_outputs(&tx)?;
+            println!("Outputs: ");
+            for output in outputs {
+                println!("value: {}", output.value);
+            }
+
+            println!();
+
+            println!("Shielded inputs: ");
+            let shielded_inputs = db::Db::get_shielded_inputs(&tx)?;
+            for note_id in &shielded_inputs {
+                println!("note_id: {note_id}");
+            }
+
+            let shielded_outputs = db::Db::get_shielded_outputs(&tx)?;
+            println!("Shielded outputs: ");
+            for (recipient, value) in shielded_outputs {
                 let recipient = bs58::encode(recipient).with_check().into_string();
-                println!("{recipient}: {value}");
+                println!("recipient: {recipient}, value: {value}");
             }
         }
         cli::Commands::CreateUtxo { value } => {

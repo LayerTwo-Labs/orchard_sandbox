@@ -142,7 +142,7 @@ impl Db {
     }
 
     pub fn get_shielded_inputs(tx: &rusqlite::Transaction) -> miette::Result<Vec<u32>> {
-        let mut statement = tx.prepare("SELECT note_id FROM inputs").into_diagnostic()?;
+        let mut statement = tx.prepare("SELECT note_id FROM shielded_inputs").into_diagnostic()?;
         let outputs: Vec<u32> = statement
             .query_map([], |row| Ok(row.get(0)?))
             .into_diagnostic()?
