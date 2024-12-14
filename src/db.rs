@@ -2,8 +2,12 @@ use bip39::{Mnemonic, Seed};
 use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
-    builder::BundleType, bundle::Flags, note::Nullifier, tree::MerkleHashOrchard, value::NoteValue,
-    Address, Anchor,
+    builder::BundleType,
+    bundle::Flags,
+    note::{Nullifier, RandomSeed, Rho},
+    tree::{MerkleHashOrchard, MerklePath},
+    value::NoteValue,
+    Address, Anchor, Note,
 };
 use rand::SeedableRng;
 use rusqlite::Connection;
@@ -227,6 +231,43 @@ impl Db {
             Err(err) => return Err(err).into_diagnostic(),
         };
         Ok(anchor)
+    }
+
+    pub fn get_note(
+        tx: &rusqlite::Transaction,
+        note_id: u32,
+    ) -> miette::Result<(Note, MerklePath)> {
+        let (recipient, value, rho, rseed, merkle_path) = tx
+            .query_row(
+                "SELECT recipient, value, rho, rseed, merkle_path FROM notes WHERE id = ?1",
+                [note_id],
+                |row| {
+                    let recipient: Vec<u8> = row.get(0)?;
+                    let value: u64 = row.get(1)?;
+                    let rho: Vec<u8> = row.get(2)?;
+                    let rseed: Vec<u8> = row.get(3)?;
+                    let merkle_path: Vec<u8> = row.get(4)?;
+                    Ok((recipient, value, rho, rseed, merkle_path))
+                },
+            )
+            .into_diagnostic()?;
+        let recipient: [u8; 43] = recipient
+            .try_into()
+            .expect("wrong recipient address length");
+        let recipient = Address::from_raw_address_bytes(&recipient)
+            .expect("subtle error, failed to construct address from bytes");
+        let value = NoteValue::from_raw(value);
+        let rho: [u8; 32] = rho.try_into().expect("wrong rho length");
+        let rho = Rho::from_bytes(&rho).expect("subtle error, failed to construct rho from bytes");
+        let rseed: [u8; 32] = rseed.try_into().expect("wrong rseed length");
+        let rseed = RandomSeed::from_bytes(rseed, &rho)
+            .expect("subtle error, failed to construct rseed from bytes");
+        let (position, auth_path): (u32, [MerkleHashOrchard; 32]) =
+            bincode::deserialize(&merkle_path).into_diagnostic()?;
+        let merkle_path = MerklePath::from_parts(position, auth_path);
+        let note = Note::from_parts(recipient, value, rho, rseed)
+            .expect("subtle error, failed to construct note from parts");
+        Ok((note, merkle_path))
     }
 
     pub fn submit_transaction(&mut self) -> miette::Result<()> {
