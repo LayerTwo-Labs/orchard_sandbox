@@ -58,13 +58,6 @@ impl Db {
             );",
             ),
             M::up(
-                "CREATE TABLE frontier(
-                    position INTEGER NOT NULL,
-                    leaf BLOB NOT NULL,
-                    ommers BLOB NOT NULL
-            );",
-            ),
-            M::up(
                 "CREATE TABLE transactions(
                     id INTEGER PRIMARY KEY,
                     tx BLOB NOT NULL
@@ -74,7 +67,7 @@ impl Db {
                 "CREATE TABLE blocks(
                     id INTEGER PRIMARY KEY,
                     fee INTEGER NOT NULL,
-                    anchor BLOB NOT NULL,
+                    frontier BLOB,
                     block BLOB NOT NULL
             );",
             ),
@@ -223,12 +216,26 @@ impl Db {
     pub fn get_bundle_anchor(tx: &rusqlite::Transaction) -> miette::Result<Anchor> {
         // We need an anchor that is a few blocks old in order to construct an Orchard bundle.
         let anchor = match tx.query_row(
-            "SELECT anchor FROM blocks ORDER BY id LIMIT 1 OFFSET 3",
+            "SELECT frontier FROM blocks ORDER BY id DESC LIMIT 1 OFFSET 3",
             [],
-            |row| row.get(0),
+            |row| {
+                let frontier_bytes: Option<Vec<u8>> = row.get(0)?;
+                Ok(frontier_bytes)
+            },
         ) {
-            Ok(anchor) => Anchor::from_bytes(anchor)
-                .expect("subtle error, failed to construct anchor from bytes"),
+            Ok(frontier_bytes) => {
+                if let Some(frontier_bytes) = frontier_bytes {
+                    let (position, leaf, ommers): (u64, MerkleHashOrchard, Vec<MerkleHashOrchard>) =
+                        bincode::deserialize(&frontier_bytes).into_diagnostic()?;
+                    let position = Position::from(position);
+                    let frontier = NonEmptyFrontier::from_parts(position, leaf, ommers)
+                        .expect("failed to construct frontier from parts");
+                    let anchor: Anchor = frontier.root(None).into();
+                    anchor
+                } else {
+                    Anchor::empty_tree()
+                }
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Anchor::empty_tree(),
             Err(err) => return Err(err).into_diagnostic(),
         };
@@ -304,7 +311,7 @@ impl Db {
         }
 
         let rng = rand::rngs::StdRng::from_entropy();
-        let (bundle, _bundle_metadata) = builder.build::<i64>(rng).into_diagnostic()?.unwrap();
+        let bundle = builder.build::<i64>(rng).into_diagnostic()?;
 
         let inputs = Self::get_inputs(&tx)?;
         let outputs = Self::get_outputs(&tx)?;
@@ -348,56 +355,32 @@ impl Db {
         Ok(transactions)
     }
 
-    fn get_frontier(
+    fn get_last_frontier(
         tx: &rusqlite::Transaction,
     ) -> miette::Result<Option<NonEmptyFrontier<MerkleHashOrchard>>> {
-        let (position, leaf, ommers): (u64, Vec<u8>, Vec<u8>) =
-            match tx.query_row("SELECT position, leaf, ommers FROM frontier", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            }) {
-                Ok((position, leaf, ommers)) => (position, leaf, ommers),
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return Ok(None);
-                }
-                Err(err) => {
-                    return Err(err).into_diagnostic();
-                }
-            };
+        let frontier: Vec<u8> = match tx.query_row(
+            "SELECT frontier FROM blocks ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(Some(frontier)) => frontier,
+            Ok(None) => {
+                return Ok(None);
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(err).into_diagnostic();
+            }
+        };
+
+        let (position, leaf, ommers): (u64, MerkleHashOrchard, Vec<MerkleHashOrchard>) =
+            bincode::deserialize(&frontier).into_diagnostic()?;
         let position = Position::from(position);
-        let leaf: [u8; 32] = leaf
-            .try_into()
-            .map_err(|_| miette!("wrong leaf length in SQLite db"))?;
-        let leaf = MerkleHashOrchard::from_bytes(&leaf)
-            .expect("subtle error while converting leaf from bytes");
-        let ommers: Vec<[u8; 32]> = bincode::deserialize(&ommers).into_diagnostic()?;
-        let ommers: Vec<MerkleHashOrchard> = ommers
-            .iter()
-            .map(|ommer| {
-                MerkleHashOrchard::from_bytes(ommer)
-                    .expect("subtle error while converting ommer from bytes")
-            })
-            .collect();
         let frontier = NonEmptyFrontier::from_parts(position, leaf, ommers)
             .expect("failed to reconstruct frontier");
         Ok(Some(frontier))
-    }
-
-    fn update_frontier(
-        tx: &rusqlite::Transaction,
-        frontier: NonEmptyFrontier<MerkleHashOrchard>,
-    ) -> miette::Result<()> {
-        tx.execute("DELETE FROM frontier", []).into_diagnostic()?;
-        let (position, leaf, ommers) = frontier.into_parts();
-        let position: u64 = position.into();
-        let leaf: [u8; 32] = leaf.to_bytes();
-        let ommers: Vec<[u8; 32]> = ommers.into_iter().map(|ommer| ommer.to_bytes()).collect();
-        let ommers_bytes: Vec<u8> = bincode::serialize(&ommers).into_diagnostic()?;
-        tx.execute(
-            "INSERT INTO frontier (position, leaf, ommers) VALUES (?1, ?2, ?3)",
-            (position, leaf, ommers_bytes),
-        )
-        .into_diagnostic()?;
-        Ok(())
     }
 
     fn insert_nullifier(tx: &rusqlite::Transaction, nullifier: &Nullifier) -> miette::Result<()> {
@@ -430,14 +413,24 @@ impl Db {
 
     fn store_block(
         tx: &rusqlite::Transaction,
-        anchor: &Anchor,
+        frontier: Option<NonEmptyFrontier<MerkleHashOrchard>>,
         fee: u64,
         block: &Block,
     ) -> miette::Result<()> {
+        let frontier_bytes = match frontier {
+            Some(frontier) => {
+                let (position, leaf, ommers) = frontier.into_parts();
+                let position: u64 = position.into();
+                let frontier_bytes =
+                    bincode::serialize(&(position, leaf, ommers)).into_diagnostic()?;
+                Some(frontier_bytes)
+            }
+            None => None,
+        };
         let block_bytes = bincode::serialize(block).into_diagnostic()?;
         tx.execute(
-            "INSERT INTO blocks (fee, anchor, block) VALUES (?1, ?2, ?3)",
-            (fee, anchor.to_bytes(), block_bytes),
+            "INSERT INTO blocks (fee, frontier, block) VALUES (?1, ?2, ?3)",
+            (fee, frontier_bytes, block_bytes),
         )
         .into_diagnostic()?;
         Ok(())
@@ -497,7 +490,10 @@ impl Db {
         Ok(fee as u64)
     }
 
-    fn connect_block(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<(Anchor, u64)> {
+    fn connect_block(
+        tx: &rusqlite::Transaction,
+        block: &Block,
+    ) -> miette::Result<(Option<NonEmptyFrontier<MerkleHashOrchard>>, u64)> {
         // Updating transparent state.
         let mut total_fee = 0;
         for transaction in &block.transactions {
@@ -513,8 +509,31 @@ impl Db {
             }
         }
 
+        /*
+        {
+            if let Some(frontier) = Self::get_frontier(tx)? {
+                let (position, leaf, ommers) = frontier.into_parts();
+                let anchor = Self::get_bundle_anchor(tx)?;
+                let sk = Self::get_sk(tx)?;
+                let fvk = orchard::keys::FullViewingKey::from(&sk);
+                let ivk = fvk.to_ivk(Scope::External);
+                let keys = [ivk];
+                for transaction in &block.transactions {
+                    let bundle = transaction.to_bundle(anchor);
+                    if let Some(bundle) = bundle {
+                        for (_action_index, _ivk, note, _address, _memo) in
+                            bundle.decrypt_outputs_with_keys(&keys)
+                        {
+                            let cmx = ExtractedNoteCommitment::from(note.commitment());
+                        }
+                    }
+                }
+            }
+        }
+        */
+
         // Updating Orchard state.
-        let anchor = {
+        let frontier = {
             // TODO: Validate zkSNARK, authorizing signature, binding signature
             let nullifiers = block.nullifiers();
             for nullifier in &nullifiers {
@@ -525,24 +544,20 @@ impl Db {
                 Self::insert_nullifier(&tx, nullifier)?;
             }
             let commitments = block.extracted_note_commitments();
-            let frontier = Self::get_frontier(&tx)?;
-            let anchor: Anchor = match frontier {
+            let last_frontier = Self::get_last_frontier(&tx)?;
+            let frontier: Option<NonEmptyFrontier<MerkleHashOrchard>> = match last_frontier {
                 Some(mut frontier) => {
-                    if commitments.is_empty() {
-                        Anchor::empty_tree()
-                    } else {
+                    if !commitments.is_empty() {
                         for cmx in &commitments {
                             let leaf = MerkleHashOrchard::from_cmx(cmx);
                             frontier.append(leaf);
                         }
-                        let anchor = frontier.root(None);
-                        Self::update_frontier(&tx, frontier)?;
-                        anchor.into()
                     }
+                    Some(frontier)
                 }
                 None => {
                     if commitments.is_empty() {
-                        Anchor::empty_tree()
+                        None
                     } else {
                         let cmx = &commitments[0];
                         let leaf = MerkleHashOrchard::from_cmx(cmx);
@@ -551,15 +566,14 @@ impl Db {
                             let leaf = MerkleHashOrchard::from_cmx(cmx);
                             frontier.append(leaf);
                         }
-                        let anchor = frontier.root(None);
-                        Self::update_frontier(&tx, frontier)?;
-                        anchor.into()
+                        Some(frontier)
                     }
                 }
             };
-            Anchor::from(anchor)
+            frontier
         };
-        Ok((anchor, total_fee))
+
+        Ok((frontier, total_fee))
     }
 
     pub fn mine(&mut self) -> miette::Result<()> {
@@ -569,8 +583,8 @@ impl Db {
             return Ok(());
         }
         let block = Block { transactions };
-        let (anchor, total_fee) = Self::connect_block(&tx, &block)?;
-        Self::store_block(&tx, &anchor, total_fee, &block)?;
+        let (frontier, total_fee) = Self::connect_block(&tx, &block)?;
+        Self::store_block(&tx, frontier, total_fee, &block)?;
         Self::clear_transactions(&tx)?;
         tx.commit().into_diagnostic()?;
         Ok(())
@@ -686,5 +700,25 @@ impl Db {
             })
             .into_diagnostic()?;
         Ok(value)
+    }
+
+    pub fn get_notes(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<Vec<Note>> {
+        let frontier = Db::get_last_frontier(tx)?;
+
+        let anchor = Db::get_bundle_anchor(tx)?;
+        let sk = Db::get_sk(tx)?;
+        let fvk = orchard::keys::FullViewingKey::from(&sk);
+        let ivk = fvk.to_ivk(zip32::Scope::External);
+        let keys = [ivk];
+        let mut decrypted_notes = vec![];
+        for transaction in &block.transactions {
+            if let Some(bundle) = transaction.to_bundle(anchor) {
+                let notes = bundle.decrypt_outputs_with_keys(&keys);
+                for (_action_index, _ivk, note, _address, _memo) in &notes {
+                    decrypted_notes.push(*note);
+                }
+            }
+        }
+        Ok(decrypted_notes)
     }
 }

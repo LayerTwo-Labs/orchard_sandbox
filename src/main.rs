@@ -3,7 +3,9 @@ mod db;
 mod types;
 
 use clap::Parser as _;
+use incrementalmerkletree::Hashable;
 use miette::IntoDiagnostic;
+use orchard::tree::MerkleHashOrchard;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();

@@ -1,4 +1,5 @@
 use orchard::{
+    builder::BundleMetadata,
     bundle::{Authorization, Flags},
     note::{ExtractedNoteCommitment, Nullifier, TransmittedNoteCiphertext},
     Anchor,
@@ -50,35 +51,54 @@ impl Transaction {
     pub fn to_bundle(
         &self,
         anchor: Anchor,
-    ) -> orchard::bundle::Bundle<orchard::bundle::testing::Unauthorized, i64> {
+    ) -> Option<orchard::bundle::Bundle<orchard::bundle::testing::Unauthorized, i64>> {
         let actions: Vec<orchard::Action<()>> = self
             .actions
             .iter()
             .cloned()
             .map(|action| action.into())
             .collect();
-        let actions = nonempty::NonEmpty::from_vec(actions).unwrap();
+        let actions = match nonempty::NonEmpty::from_vec(actions) {
+            Some(actions) => actions,
+            None => return None,
+        };
         let flags = Flags::ENABLED;
         let value_balance_orchard = self.value_balance_orchard;
         let authorization = orchard::bundle::testing::Unauthorized;
-        orchard::Bundle::from_parts(actions, flags, value_balance_orchard, anchor, authorization)
+        Some(orchard::Bundle::from_parts(
+            actions,
+            flags,
+            value_balance_orchard,
+            anchor,
+            authorization,
+        ))
     }
 
     pub fn from_bundle<T: Authorization>(
         inputs: Vec<u32>,
         outputs: Vec<Output>,
-        bundle: &orchard::bundle::Bundle<T, i64>,
+        bundle: &Option<(orchard::bundle::Bundle<T, i64>, BundleMetadata)>,
     ) -> Self {
-        let mut actions = vec![];
-        for action in bundle.actions() {
-            let action = Action::from(action);
-            actions.push(action);
-        }
-        Self {
-            inputs,
-            outputs,
-            actions,
-            value_balance_orchard: *bundle.value_balance(),
+        match bundle {
+            Some((bundle, _bundle_metadata)) => {
+                let mut actions = vec![];
+                for action in bundle.actions() {
+                    let action = Action::from(action);
+                    actions.push(action);
+                }
+                Self {
+                    inputs,
+                    outputs,
+                    actions,
+                    value_balance_orchard: *bundle.value_balance(),
+                }
+            }
+            None => Self {
+                inputs,
+                outputs,
+                actions: vec![],
+                value_balance_orchard: 0,
+            },
         }
     }
 
