@@ -1,11 +1,11 @@
 use crate::types::{Block, Output};
 use bip39::{Mnemonic, Seed};
-use incrementalmerkletree::{frontier::NonEmptyFrontier, Position};
+use incrementalmerkletree::{frontier::NonEmptyFrontier, Level, Position};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
     builder::BundleType,
     bundle::Flags,
-    note::{Nullifier, RandomSeed, Rho},
+    note::{ExtractedNoteCommitment, Nullifier, RandomSeed, Rho},
     tree::{MerkleHashOrchard, MerklePath},
     value::NoteValue,
     Address, Anchor, Note,
@@ -230,7 +230,7 @@ impl Db {
                     let position = Position::from(position);
                     let frontier = NonEmptyFrontier::from_parts(position, leaf, ommers)
                         .expect("failed to construct frontier from parts");
-                    let anchor: Anchor = frontier.root(None).into();
+                    let anchor: Anchor = frontier.root(Some(Level::from(32))).into();
                     anchor
                 } else {
                     Anchor::empty_tree()
@@ -509,28 +509,51 @@ impl Db {
             }
         }
 
-        /*
         {
-            if let Some(frontier) = Self::get_frontier(tx)? {
-                let (position, leaf, ommers) = frontier.into_parts();
-                let anchor = Self::get_bundle_anchor(tx)?;
-                let sk = Self::get_sk(tx)?;
-                let fvk = orchard::keys::FullViewingKey::from(&sk);
-                let ivk = fvk.to_ivk(Scope::External);
-                let keys = [ivk];
-                for transaction in &block.transactions {
-                    let bundle = transaction.to_bundle(anchor);
-                    if let Some(bundle) = bundle {
-                        for (_action_index, _ivk, note, _address, _memo) in
-                            bundle.decrypt_outputs_with_keys(&keys)
-                        {
-                            let cmx = ExtractedNoteCommitment::from(note.commitment());
-                        }
+            let anchor = Self::get_bundle_anchor(tx)?;
+            let sk = Self::get_sk(tx)?;
+            let fvk = orchard::keys::FullViewingKey::from(&sk);
+            let ivk = fvk.to_ivk(zip32::Scope::External);
+            let keys = [ivk];
+            let mut notes = vec![];
+            for transaction in &block.transactions {
+                let bundle = transaction.to_bundle(anchor);
+                if let Some(bundle) = bundle {
+                    for (_action_index, _ivk, note, _address, _memo) in
+                        bundle.decrypt_outputs_with_keys(&keys)
+                    {
+                        notes.push(note);
                     }
                 }
             }
+            let frontier = Self::get_last_frontier(tx)?;
+            let frontier = match frontier {
+                Some(mut frontier) => {
+                    for note in notes {
+                        let cmx = ExtractedNoteCommitment::from(note.commitment());
+                        let leaf = MerkleHashOrchard::from_cmx(&cmx);
+                        frontier.append(leaf);
+                    }
+                    Some(frontier)
+                }
+                None => {
+                    if notes.len() > 0 {
+                        let note = &notes[0];
+                        let cmx = ExtractedNoteCommitment::from(note.commitment());
+                        let leaf = MerkleHashOrchard::from_cmx(&cmx);
+                        let mut frontier = NonEmptyFrontier::new(leaf);
+                        for note in &notes[1..] {
+                            let cmx = ExtractedNoteCommitment::from(note.commitment());
+                            let leaf = MerkleHashOrchard::from_cmx(&cmx);
+                            frontier.append(leaf);
+                        }
+                        Some(frontier)
+                    } else {
+                        None
+                    }
+                }
+            };
         }
-        */
 
         // Updating Orchard state.
         let frontier = {
