@@ -3,9 +3,7 @@ mod db;
 mod types;
 
 use clap::Parser as _;
-use incrementalmerkletree::Hashable;
 use miette::IntoDiagnostic;
-use orchard::tree::MerkleHashOrchard;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
@@ -121,9 +119,18 @@ fn main() -> miette::Result<()> {
             db.conjure_utxo(*value)?;
         }
         cli::Commands::GetUtxos => {
+            println!("transparent utxos: ");
             let utxos = db.get_utxos()?;
             for (id, value) in utxos {
                 println!("id: {id} value: {value}");
+            }
+            println!();
+            println!("shielded notes: ");
+            let notes = db.get_wallet_notes()?;
+            for (id, recipient, value) in notes {
+                let recipient = recipient.to_raw_address_bytes();
+                let recipient = bs58::encode(&recipient).with_check().into_string();
+                println!("id: {id} recipient: {recipient} value: {value}");
             }
         }
     }

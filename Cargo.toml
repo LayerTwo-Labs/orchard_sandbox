@@ -9,7 +9,7 @@ blake3 = "1.5.4"
 bs58 = { version = "0.5.1", features = ["check"] }
 clap = { version = "4.5.21", features = ["derive"] }
 hex = "0.4.3"
-incrementalmerkletree = { version = "0.7.0", features = ["test-dependencies"] }
+incrementalmerkletree = { version = "0.7.0", features = ["legacy-api"] }
 miette = { version = "7.2.0", features = ["fancy"] }
 nonempty = { version = "0.7.0", features = ["serde"] }
 orchard = { version = "0.10.0", features = ["test-dependencies"] }

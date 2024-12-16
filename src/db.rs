@@ -1,12 +1,16 @@
 use crate::types::{Block, Output};
 use bip39::{Mnemonic, Seed};
-use incrementalmerkletree::{frontier::NonEmptyFrontier, Level, Position};
+use incrementalmerkletree::{
+    frontier::{CommitmentTree, Frontier, NonEmptyFrontier},
+    witness::IncrementalWitness,
+    Level, Position,
+};
 use miette::{miette, IntoDiagnostic};
 use orchard::{
     builder::BundleType,
     bundle::Flags,
     note::{ExtractedNoteCommitment, Nullifier, RandomSeed, Rho},
-    tree::{MerkleHashOrchard, MerklePath},
+    tree::MerkleHashOrchard,
     value::NoteValue,
     Address, Anchor, Note,
 };
@@ -245,7 +249,7 @@ impl Db {
     pub fn get_note(
         tx: &rusqlite::Transaction,
         note_id: u32,
-    ) -> miette::Result<(Note, MerklePath)> {
+    ) -> miette::Result<(Note, orchard::tree::MerklePath)> {
         let (recipient, value, rho, rseed, merkle_path) = tx
             .query_row(
                 "SELECT recipient, value, rho, rseed, merkle_path FROM notes WHERE id = ?1",
@@ -273,7 +277,7 @@ impl Db {
             .expect("subtle error, failed to construct rseed from bytes");
         let (position, auth_path): (u32, [MerkleHashOrchard; 32]) =
             bincode::deserialize(&merkle_path).into_diagnostic()?;
-        let merkle_path = MerklePath::from_parts(position, auth_path);
+        let merkle_path = orchard::tree::MerklePath::from_parts(position, auth_path);
         let note = Note::from_parts(recipient, value, rho, rseed)
             .expect("subtle error, failed to construct note from parts");
         Ok((note, merkle_path))
@@ -509,6 +513,7 @@ impl Db {
             }
         }
 
+        // Storing notes and corresponding merkle proofs.
         {
             let anchor = Self::get_bundle_anchor(tx)?;
             let sk = Self::get_sk(tx)?;
@@ -526,33 +531,55 @@ impl Db {
                     }
                 }
             }
-            let frontier = Self::get_last_frontier(tx)?;
-            let frontier = match frontier {
-                Some(mut frontier) => {
-                    for note in notes {
-                        let cmx = ExtractedNoteCommitment::from(note.commitment());
-                        let leaf = MerkleHashOrchard::from_cmx(&cmx);
-                        frontier.append(leaf);
-                    }
-                    Some(frontier)
-                }
-                None => {
-                    if notes.len() > 0 {
-                        let note = &notes[0];
-                        let cmx = ExtractedNoteCommitment::from(note.commitment());
-                        let leaf = MerkleHashOrchard::from_cmx(&cmx);
-                        let mut frontier = NonEmptyFrontier::new(leaf);
-                        for note in &notes[1..] {
+            if notes.len() > 0 {
+                let mut frontier = {
+                    let frontier = Self::get_last_frontier(tx)?;
+                    match frontier {
+                        Some(frontier) => frontier,
+                        None => {
+                            let note = notes[0];
+                            notes.remove(0);
                             let cmx = ExtractedNoteCommitment::from(note.commitment());
                             let leaf = MerkleHashOrchard::from_cmx(&cmx);
-                            frontier.append(leaf);
+                            let frontier = NonEmptyFrontier::new(leaf);
+
+                            let witness = {
+                                let frontier: Frontier<MerkleHashOrchard, 32> =
+                                    Frontier::try_from(frontier.clone()).map_err(|_err| {
+                                        miette!("failed to convert NonEmptyFrontier to Frontier")
+                                    })?;
+                                let tree: CommitmentTree<MerkleHashOrchard, 32> =
+                                    CommitmentTree::from_frontier(&frontier);
+                                IncrementalWitness::from_tree(tree)
+                            };
+                            let merkle_path = witness
+                                .path()
+                                .expect("attempted to merkle proof with empty commitment tree");
+                            Self::store_note(tx, &note, &merkle_path)?;
+                            frontier
                         }
-                        Some(frontier)
-                    } else {
-                        None
                     }
+                };
+
+                for note in notes {
+                    let cmx = ExtractedNoteCommitment::from(note.commitment());
+                    let leaf = MerkleHashOrchard::from_cmx(&cmx);
+                    frontier.append(leaf);
+                    let witness = {
+                        let frontier: Frontier<MerkleHashOrchard, 32> =
+                            Frontier::try_from(frontier.clone()).map_err(|_err| {
+                                miette!("failed to convert NonEmptyFrontier to Frontier")
+                            })?;
+                        let tree: CommitmentTree<MerkleHashOrchard, 32> =
+                            CommitmentTree::from_frontier(&frontier);
+                        IncrementalWitness::from_tree(tree)
+                    };
+                    let merkle_path = witness
+                        .path()
+                        .expect("attempted to merkle proof with empty commitment tree");
+                    Self::store_note(tx, &note, &merkle_path)?;
                 }
-            };
+            }
         }
 
         // Updating Orchard state.
@@ -716,6 +743,27 @@ impl Db {
         Ok(utxos)
     }
 
+    pub fn get_wallet_notes(&self) -> miette::Result<Vec<(u32, Address, u64)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, recipient, value FROM notes")
+            .into_diagnostic()?;
+        let notes: Vec<(u32, Address, u64)> = statement
+            .query_map([], |row| {
+                let id = row.get(0)?;
+                let address: Vec<u8> = row.get(1)?;
+                let address: [u8; 43] = address.try_into().expect("wrong shielded address length");
+                let address = Address::from_raw_address_bytes(&address)
+                    .expect("subtle error, failed to conver bytes to shielded address");
+                let value = row.get(2)?;
+                Ok((id, address, value))
+            })
+            .into_diagnostic()?
+            .collect::<Result<Vec<_>, _>>()
+            .into_diagnostic()?;
+        Ok(notes)
+    }
+
     pub fn get_utxo_value(tx: &rusqlite::Transaction, id: u32) -> miette::Result<u64> {
         let value = tx
             .query_row("SELECT value FROM utxos WHERE id = ?1", [id], |row| {
@@ -725,9 +773,27 @@ impl Db {
         Ok(value)
     }
 
-    pub fn get_notes(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<Vec<Note>> {
-        let frontier = Db::get_last_frontier(tx)?;
+    pub fn store_note(
+        tx: &rusqlite::Transaction,
+        note: &Note,
+        merkle_path: &incrementalmerkletree::MerklePath<MerkleHashOrchard, 32>,
+    ) -> miette::Result<()> {
+        let recipient = note.recipient().to_raw_address_bytes();
+        let value = note.value().inner();
+        let rho = note.rho().to_bytes();
+        let rseed = note.rseed().as_bytes();
+        let position: u64 = merkle_path.position().into();
+        let position: u32 = position as u32;
+        let path = merkle_path.path_elems();
+        let path: [MerkleHashOrchard; 32] = path
+            .try_into()
+            .expect("failed to convert merkle path to fixed array");
+        let merkle_path_bytes = bincode::serialize(&(position, path)).into_diagnostic()?;
+        tx.execute("INSERT INTO notes (recipient, value, rho, rseed, merkle_path) VALUES (?1, ?2, ?3, ?4, ?5)", (&recipient, &value, &rho, &rseed, &merkle_path_bytes)).into_diagnostic()?;
+        Ok(())
+    }
 
+    pub fn get_notes(tx: &rusqlite::Transaction, block: &Block) -> miette::Result<Vec<Note>> {
         let anchor = Db::get_bundle_anchor(tx)?;
         let sk = Db::get_sk(tx)?;
         let fvk = orchard::keys::FullViewingKey::from(&sk);
