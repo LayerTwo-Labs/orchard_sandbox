@@ -24,6 +24,8 @@ pub enum Commands {
     SpendNote { note_id: u32 },
     /// Submit pending transaction to mempool
     SubmitTxn,
+    /// Clear pending transaction in mempool
+    ClearTxn,
     /// Mine a block
     Mine,
     /// Get wallet seed mnemonic 12 words

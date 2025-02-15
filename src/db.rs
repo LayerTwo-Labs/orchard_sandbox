@@ -40,7 +40,7 @@ impl Db {
                     value INTEGER NOT NULL,
                     rho BLOB NOT NULL,
                     rseed BLOB NOT NULL,
-                    merkle_path BLOB NOT NULL
+                    witness BLOB NOT NULL
 
             );",
             ),
@@ -250,17 +250,17 @@ impl Db {
         tx: &rusqlite::Transaction,
         note_id: u32,
     ) -> miette::Result<(Note, orchard::tree::MerklePath)> {
-        let (recipient, value, rho, rseed, merkle_path) = tx
+        let (recipient, value, rho, rseed, witness) = tx
             .query_row(
-                "SELECT recipient, value, rho, rseed, merkle_path FROM notes WHERE id = ?1",
+                "SELECT recipient, value, rho, rseed, witness FROM notes WHERE id = ?1",
                 [note_id],
                 |row| {
                     let recipient: Vec<u8> = row.get(0)?;
                     let value: u64 = row.get(1)?;
                     let rho: Vec<u8> = row.get(2)?;
                     let rseed: Vec<u8> = row.get(3)?;
-                    let merkle_path: Vec<u8> = row.get(4)?;
-                    Ok((recipient, value, rho, rseed, merkle_path))
+                    let witness: Vec<u8> = row.get(4)?;
+                    Ok((recipient, value, rho, rseed, witness))
                 },
             )
             .into_diagnostic()?;
@@ -276,16 +276,29 @@ impl Db {
         let rseed = RandomSeed::from_bytes(rseed, &rho)
             .expect("subtle error, failed to construct rseed from bytes");
         let (position, auth_path): (u32, [MerkleHashOrchard; 32]) =
-            bincode::deserialize(&merkle_path).into_diagnostic()?;
-        let merkle_path = orchard::tree::MerklePath::from_parts(position, auth_path);
+            bincode::deserialize(&witness).into_diagnostic()?;
+        let witness = orchard::tree::MerklePath::from_parts(position, auth_path);
         let note = Note::from_parts(recipient, value, rho, rseed)
             .expect("subtle error, failed to construct note from parts");
-        Ok((note, merkle_path))
+        Ok((note, witness))
+    }
+
+    pub fn clear_transaction(&mut self) -> miette::Result<()> {
+        let tx = self.conn.transaction().into_diagnostic()?;
+        tx.execute("DELETE FROM inputs", []).into_diagnostic()?;
+        tx.execute("DELETE FROM outputs", []).into_diagnostic()?;
+        tx.execute("DELETE FROM shielded_inputs", [])
+            .into_diagnostic()?;
+        tx.execute("DELETE FROM shielded_outputs", [])
+            .into_diagnostic()?;
+        tx.commit().into_diagnostic()?;
+        Ok(())
     }
 
     pub fn submit_transaction(&mut self) -> miette::Result<()> {
         let tx = self.conn.transaction().into_diagnostic()?;
         let anchor: Anchor = Self::get_bundle_anchor(&tx)?;
+        dbg!(&anchor);
         let mut builder = orchard::builder::Builder::new(
             BundleType::Transactional {
                 flags: Flags::ENABLED,
@@ -294,14 +307,19 @@ impl Db {
             anchor,
         );
         let shielded_inputs = Self::get_shielded_inputs(&tx)?;
+        let (_note, one_witness) = Self::get_note(&tx, shielded_inputs[0])?;
         for note_id in shielded_inputs {
-            let (note, merkle_path) = Self::get_note(&tx, note_id)?;
+            let (note, witness) = Self::get_note(&tx, note_id)?;
+            dbg!(note_id, &witness.root(note.commitment().into()));
+            dbg!(note_id, &one_witness.root(note.commitment().into()));
             let sk = Self::get_sk(&tx)?;
             let fvk = orchard::keys::FullViewingKey::from(&sk);
-            builder
-                .add_spend(fvk, note, merkle_path)
-                .into_diagnostic()?;
+            println!("here");
+            let err = builder.add_spend(fvk, note, witness);
+            dbg!(&err);
+            // err.into_diagnostic()?;
         }
+        panic!();
         let shielded_outputs = Self::get_shielded_outputs(&tx)?;
         for (recipient, value) in shielded_outputs {
             let recipient: [u8; 43] = recipient
@@ -334,7 +352,6 @@ impl Db {
             .into_diagnostic()?;
         tx.execute("DELETE FROM shielded_outputs", [])
             .into_diagnostic()?;
-
         tx.commit().into_diagnostic()?;
 
         Ok(())
@@ -531,6 +548,7 @@ impl Db {
                     }
                 }
             }
+            let mut witnesses = vec![];
             if notes.len() > 0 {
                 let mut frontier = {
                     let frontier = Self::get_last_frontier(tx)?;
@@ -552,10 +570,7 @@ impl Db {
                                     CommitmentTree::from_frontier(&frontier);
                                 IncrementalWitness::from_tree(tree)
                             };
-                            let merkle_path = witness
-                                .path()
-                                .expect("attempted to merkle proof with empty commitment tree");
-                            Self::store_note(tx, &note, &merkle_path)?;
+                            witnesses.push((witness, note));
                             frontier
                         }
                     }
@@ -565,6 +580,9 @@ impl Db {
                     let cmx = ExtractedNoteCommitment::from(note.commitment());
                     let leaf = MerkleHashOrchard::from_cmx(&cmx);
                     frontier.append(leaf);
+                    for (witness, _note) in witnesses.iter_mut() {
+                        witness.append(leaf).expect("tree is full");
+                    }
                     let witness = {
                         let frontier: Frontier<MerkleHashOrchard, 32> =
                             Frontier::try_from(frontier.clone()).map_err(|_err| {
@@ -574,11 +592,12 @@ impl Db {
                             CommitmentTree::from_frontier(&frontier);
                         IncrementalWitness::from_tree(tree)
                     };
-                    let merkle_path = witness
-                        .path()
-                        .expect("attempted to merkle proof with empty commitment tree");
-                    Self::store_note(tx, &note, &merkle_path)?;
+                    witnesses.push((witness, note));
                 }
+            }
+
+            for (witness, note) in witnesses {
+                Self::store_note(tx, &note, &witness)?;
             }
         }
 
@@ -743,20 +762,39 @@ impl Db {
         Ok(utxos)
     }
 
-    pub fn get_wallet_notes(&self) -> miette::Result<Vec<(u32, Address, u64)>> {
+    pub fn get_wallet_notes(
+        &self,
+    ) -> miette::Result<Vec<(u32, Note, IncrementalWitness<MerkleHashOrchard, 32>)>> {
         let mut statement = self
             .conn
-            .prepare("SELECT id, recipient, value FROM notes")
+            .prepare("SELECT id, recipient, value, rho, rseed, witness FROM notes")
             .into_diagnostic()?;
-        let notes: Vec<(u32, Address, u64)> = statement
+        let notes: Vec<(u32, Note, IncrementalWitness<MerkleHashOrchard, 32>)> = statement
             .query_map([], |row| {
                 let id = row.get(0)?;
-                let address: Vec<u8> = row.get(1)?;
-                let address: [u8; 43] = address.try_into().expect("wrong shielded address length");
-                let address = Address::from_raw_address_bytes(&address)
-                    .expect("subtle error, failed to conver bytes to shielded address");
-                let value = row.get(2)?;
-                Ok((id, address, value))
+                let note = {
+                    let recipient: Vec<u8> = row.get(1)?;
+                    let recipient: [u8; 43] =
+                        recipient.try_into().expect("wrong shielded address length");
+                    let recipient = Address::from_raw_address_bytes(&recipient)
+                        .expect("subtle error, failed to convert bytes to shielded address");
+                    let value = row.get(2)?;
+                    let value = NoteValue::from_raw(value);
+                    let rho: Vec<u8> = row.get(3)?;
+                    let rho: [u8; 32] = rho.try_into().expect("wrong rho length");
+                    let rho = Rho::from_bytes(&rho)
+                        .expect("subtle error, failed to convert bytes to rho");
+                    let rseed: Vec<u8> = row.get(4)?;
+                    let rseed: [u8; 32] = rseed.try_into().expect("wrong rseed length");
+                    let rseed = RandomSeed::from_bytes(rseed, &rho)
+                        .expect("subtle error, failed to convert bytes to rseed");
+                    Note::from_parts(recipient, value, rho, rseed)
+                        .expect("subtle error, failed to construct note")
+                };
+                let witness: Vec<u8> = row.get(5)?;
+                let witness = deserialize_incremental_witness(&witness)
+                    .expect("failed to deserialize incremental witness");
+                Ok((id, note, witness))
             })
             .into_diagnostic()?
             .collect::<Result<Vec<_>, _>>()
@@ -776,20 +814,18 @@ impl Db {
     pub fn store_note(
         tx: &rusqlite::Transaction,
         note: &Note,
-        merkle_path: &incrementalmerkletree::MerklePath<MerkleHashOrchard, 32>,
+        witness: &IncrementalWitness<MerkleHashOrchard, 32>,
     ) -> miette::Result<()> {
         let recipient = note.recipient().to_raw_address_bytes();
         let value = note.value().inner();
         let rho = note.rho().to_bytes();
         let rseed = note.rseed().as_bytes();
-        let position: u64 = merkle_path.position().into();
-        let position: u32 = position as u32;
-        let path = merkle_path.path_elems();
-        let path: [MerkleHashOrchard; 32] = path
-            .try_into()
-            .expect("failed to convert merkle path to fixed array");
-        let merkle_path_bytes = bincode::serialize(&(position, path)).into_diagnostic()?;
-        tx.execute("INSERT INTO notes (recipient, value, rho, rseed, merkle_path) VALUES (?1, ?2, ?3, ?4, ?5)", (&recipient, &value, &rho, &rseed, &merkle_path_bytes)).into_diagnostic()?;
+        let witness_bytes = serialize_incremental_witness(witness)?;
+        tx.execute(
+            "INSERT INTO notes (recipient, value, rho, rseed, witness) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (&recipient, &value, &rho, &rseed, &witness_bytes),
+        )
+        .into_diagnostic()?;
         Ok(())
     }
 
@@ -810,4 +846,48 @@ impl Db {
         }
         Ok(decrypted_notes)
     }
+}
+
+fn deserialize_incremental_witness(
+    bytes: &[u8],
+) -> miette::Result<IncrementalWitness<MerkleHashOrchard, 32>> {
+    let (tree, filled, cursor): (
+        (
+            Option<MerkleHashOrchard>,
+            Option<MerkleHashOrchard>,
+            Vec<Option<MerkleHashOrchard>>,
+        ),
+        Vec<MerkleHashOrchard>,
+        Option<(
+            Option<MerkleHashOrchard>,
+            Option<MerkleHashOrchard>,
+            Vec<Option<MerkleHashOrchard>>,
+        )>,
+    ) = bincode::deserialize(bytes).into_diagnostic()?;
+    let tree: CommitmentTree<MerkleHashOrchard, 32> = {
+        let (left, right, parents) = tree;
+        CommitmentTree::from_parts(left, right, parents)
+            .expect("failed to construct commitment tree from parts")
+    };
+    let cursor: Option<CommitmentTree<MerkleHashOrchard, 32>> =
+        cursor.map(|(left, right, parents)| {
+            CommitmentTree::from_parts(left, right, parents)
+                .expect("failed to construct commitment tree from parts")
+        });
+    let witness: IncrementalWitness<MerkleHashOrchard, 32> =
+        IncrementalWitness::from_parts(tree, filled, cursor);
+    Ok(witness)
+}
+
+fn serialize_incremental_witness(
+    witness: &IncrementalWitness<MerkleHashOrchard, 32>,
+) -> miette::Result<Vec<u8>> {
+    let tree = witness.tree();
+    let tree = (tree.left(), tree.right(), tree.parents());
+    let filled = witness.filled();
+    let cursor = witness.cursor().clone();
+    let cursor = cursor.map(|cursor| (*cursor.left(), *cursor.right(), cursor.parents().clone()));
+    let parts = (tree, filled, cursor);
+    let bytes = bincode::serialize(&parts).into_diagnostic()?;
+    Ok(bytes)
 }

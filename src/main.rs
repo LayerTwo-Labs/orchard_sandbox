@@ -93,6 +93,9 @@ fn main() -> miette::Result<()> {
         cli::Commands::SubmitTxn => {
             db.submit_transaction()?;
         }
+        cli::Commands::ClearTxn => {
+            db.clear_transaction()?;
+        }
         cli::Commands::Mine => {
             db.mine()?;
         }
@@ -127,9 +130,10 @@ fn main() -> miette::Result<()> {
             println!();
             println!("shielded notes: ");
             let notes = db.get_wallet_notes()?;
-            for (id, recipient, value) in notes {
-                let recipient = recipient.to_raw_address_bytes();
+            for (id, note, _witness) in notes {
+                let recipient = note.recipient().to_raw_address_bytes();
                 let recipient = bs58::encode(&recipient).with_check().into_string();
+                let value = note.value().inner();
                 println!("id: {id} recipient: {recipient} value: {value}");
             }
         }
