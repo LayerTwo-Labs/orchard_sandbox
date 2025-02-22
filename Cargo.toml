@@ -1,0 +1,19 @@
+[package]
+name = "zcash-sidechain"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+orchard = "0.6"  # For Orchard protocol operations
+rusqlite = { version = "0.30", features = ["bundled"] }  # SQLite with bundled SQLite library
+rand = "0.8"  # For cryptographic randomness
+serde = { version = "1.0", features = ["derive"] }  # For serialization
+serde_json = "1.0"  # JSON support
+thiserror = "1.0"  # Error handling
+tokio = { version = "1.0", features = ["full"] }  # Async runtime
+hex = "0.4"  # For hex encoding/decoding
+blake2 = "0.10"  # For hashing
+time = { version = "0.3", features = ["serde"] }  # Timestamp handling
+
+[dev-dependencies]
+tempfile = "3.8"  # For temporary test databases
